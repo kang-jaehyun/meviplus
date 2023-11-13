@@ -6,7 +6,7 @@ import multiprocessing as mp
 from collections import deque
 import cv2
 import torch
-import numpy as np
+
 from visualizer import TrackVisualizer
 
 from detectron2.data import MetadataCatalog
@@ -14,7 +14,7 @@ from detectron2.engine.defaults import DefaultPredictor
 from detectron2.structures import Instances
 from detectron2.utils.video_visualizer import VideoVisualizer
 from detectron2.utils.visualizer import ColorMode
-from transformers import BertTokenizer, RobertaTokenizerFast
+
 
 class VisualizationDemo(object):
     def __init__(self, cfg, instance_mode=ColorMode.IMAGE, parallel=False, conf_thres=0.5):
@@ -39,7 +39,7 @@ class VisualizationDemo(object):
             self.predictor = VideoPredictor(cfg)
         self.conf_thres = conf_thres
 
-    def run_on_video(self, frames, sentence):
+    def run_on_video(self, frames):
         """
         Args:
             frames (List[np.ndarray]): a list of images of shape (H, W, C) (in BGR order).
@@ -49,44 +49,33 @@ class VisualizationDemo(object):
             vis_output (VisImage): the visualized image output.
         """
         vis_output = None
-        predictions = self.predictor(frames, sentence)
+        predictions = self.predictor(frames)
 
         image_size = predictions["image_size"]
-        # _pred_scores = predictions["pred_scores"]
-        # _pred_labels = predictions["pred_labels"]
+        _pred_scores = predictions["pred_scores"]
+        _pred_labels = predictions["pred_labels"]
         _pred_masks = predictions["pred_masks"]
-        frame_masks = [m for m in _pred_masks[0]]
-        # pred_scores, pred_labels, pred_masks = [], [], []
-        # for s, l, m in zip(_pred_scores, _pred_labels, _pred_masks):
-        #     if s > self.conf_thres:
-        #         pred_scores.append(s)
-        #         pred_labels.append(l)
-        #         pred_masks.append(m)
 
-        # frame_masks = list(zip(*pred_masks))
+        pred_scores, pred_labels, pred_masks = [], [], []
+        for s, l, m in zip(_pred_scores, _pred_labels, _pred_masks):
+            if s > self.conf_thres:
+                pred_scores.append(s)
+                pred_labels.append(l)
+                pred_masks.append(m)
+
+        frame_masks = list(zip(*pred_masks))
         total_vis_output = []
         for frame_idx in range(len(frames)):
-            frame = frames[frame_idx]#[:, :, ::-1]
-            mask = frame_masks[frame_idx]
-
-            # if mask is empty
-            if mask.sum() == 0:
-                print("Mask is empty for frame {}".format(frame_idx))
+            frame = frames[frame_idx][:, :, ::-1]
             visualizer = TrackVisualizer(frame, self.metadata, instance_mode=self.instance_mode)
-            # ins = Instances(image_size)
-            # if len(pred_scores) > 0:
-            #     ins.scores = pred_scores
-            #     ins.pred_classes = pred_labels
-            #     ins.pred_masks = torch.stack(frame_masks[frame_idx], dim=0)
-            alpha = 0.5
-            
-            color = [100, 0, 200] 
-            colored_mask = np.zeros_like(frame)
-            colored_mask[mask > 0.5] = color
-            blended_image = alpha * frame + (1 - alpha) * colored_mask
-            total_vis_output.append(blended_image)
-            # vis_output = visualizer.draw_instance_predictions(predictions=ins)
-            # total_vis_output.append(vis_output)
+            ins = Instances(image_size)
+            if len(pred_scores) > 0:
+                ins.scores = pred_scores
+                ins.pred_classes = pred_labels
+                ins.pred_masks = torch.stack(frame_masks[frame_idx], dim=0)
+
+            vis_output = visualizer.draw_instance_predictions(predictions=ins)
+            total_vis_output.append(vis_output)
 
         return predictions, total_vis_output
 
@@ -111,11 +100,7 @@ class VideoPredictor(DefaultPredictor):
         inputs = cv2.imread("input.jpg")
         outputs = pred(inputs)
     """
-    def __init__(self, cfg):
-        super().__init__(cfg)
-        self.max_tokens = 40
-        self.tokenizer = RobertaTokenizerFast.from_pretrained('roberta-base')
-    def __call__(self, frames, sentence_raw):
+    def __call__(self, frames):
         """
         Args:
             original_image (np.ndarray): an image of shape (H, W, C) (in BGR order).
@@ -125,15 +110,6 @@ class VideoPredictor(DefaultPredictor):
                 See :doc:`/tutorials/models` for details about the format.
         """
         with torch.no_grad():  # https://github.com/sphinx-doc/sphinx/issues/4258
-            attention_mask = [0] * self.max_tokens
-            padded_input_ids = [0] * self.max_tokens
-
-            input_ids = self.tokenizer.encode(text=sentence_raw, add_special_tokens=True)
-
-            input_ids = input_ids[:self.max_tokens]
-            padded_input_ids[:len(input_ids)] = input_ids
-            attention_mask[:len(input_ids)] = [1] * len(input_ids)
-            
             input_frames = []
             for original_image in frames:
                 # Apply pre-processing to image.
@@ -144,13 +120,8 @@ class VideoPredictor(DefaultPredictor):
                 image = self.aug.get_transform(original_image).apply_image(original_image)
                 image = torch.as_tensor(image.astype("float32").transpose(2, 0, 1))
                 input_frames.append(image)
-            # lang_tokens, lang_mask
-            inputs = {"image": input_frames, 
-                      "height": height, 
-                      "width": width, 
-                      "lang_tokens": torch.tensor(padded_input_ids).unsqueeze(0),
-                      "lang_mask": torch.tensor(attention_mask).unsqueeze(0),
-                      "dataset_name":'mevis'}
+
+            inputs = {"image": input_frames, "height": height, "width": width}
             predictions = self.model([inputs])
             return predictions
 

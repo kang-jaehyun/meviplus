@@ -24,12 +24,9 @@ from detectron2.projects.deeplab import add_deeplab_config
 from detectron2.utils.logger import setup_logger
 
 from mask2former import add_maskformer2_config
-from lmpm import add_vita_config
+from vita import add_vita_config
+from genvis import add_genvis_config
 from predictor import VisualizationDemo
-
-
-# constants
-WINDOW_NAME = "vita video demo"
 
 
 def setup_cfg(args):
@@ -38,6 +35,7 @@ def setup_cfg(args):
     add_deeplab_config(cfg)
     add_maskformer2_config(cfg)
     add_vita_config(cfg)
+    add_genvis_config(cfg)
     cfg.merge_from_file(args.config_file)
     cfg.merge_from_list(args.opts)
     cfg.freeze()
@@ -45,10 +43,10 @@ def setup_cfg(args):
 
 
 def get_parser():
-    parser = argparse.ArgumentParser(description="vita demo for builtin configs")
+    parser = argparse.ArgumentParser(description="genvis demo for builtin configs")
     parser.add_argument(
         "--config-file",
-        default="configs/youtubevis_2019/vita_R50_bs8.yaml",
+        default="configs/genvis/youtubevis_2019/genvis_R50_bs8_online.yaml",
         metavar="FILE",
         help="path to config file",
     )
@@ -75,7 +73,7 @@ def get_parser():
     parser.add_argument(
         "--confidence-threshold",
         type=float,
-        default=0.1,
+        default=0.5,
         help="Minimum score for instance predictions to be shown",
     )
     parser.add_argument(
@@ -114,12 +112,10 @@ if __name__ == "__main__":
     cfg = setup_cfg(args)
 
     demo = VisualizationDemo(cfg, conf_thres=args.confidence_threshold)
-    sentence = "Bull charging forward and moving around"
-    parsed_sentence = "_".join(sentence.strip('., ').split())
+
     if args.output:
-        vid_id = args.input[0].split('/')[-2]
-        os.makedirs(os.path.join(args.output, vid_id, parsed_sentence), exist_ok=True)
-    
+        os.makedirs(args.output, exist_ok=True)
+
     if args.input:
         if len(args.input) == 1:
             args.input = glob.glob(os.path.expanduser(args.input[0]))
@@ -132,23 +128,29 @@ if __name__ == "__main__":
 
         start_time = time.time()
         with autocast():
-            predictions, visualized_output = demo.run_on_video(vid_frames, sentence)
+            predictions, visualized_output = demo.run_on_video(vid_frames)
         logger.info(
-            "detection done per frame in {:.2f}s".format(
-                time.time() - start_time
+            "detected {} instances per frame in {:.2f}s".format(
+                len(predictions["pred_scores"]), time.time() - start_time
             )
         )
 
         if args.output:
             if args.save_frames:
                 for path, _vis_output in zip(args.input, visualized_output):
-                    out_filename = os.path.join(args.output, vid_id, parsed_sentence, os.path.basename(path))
-                    # _vis_output = _vis_output[:, :, ::-1]
-                    cv2.imwrite(out_filename, _vis_output)
-                    # _vis_output.save(out_filename)
+                    out_filename = os.path.join(args.output, os.path.basename(path))
+                    _vis_output.save(out_filename)
 
-            H, W = visualized_output[0].shape[:2]
+            H, W = visualized_output[0].height, visualized_output[0].width
 
+            cap = cv2.VideoCapture(-1)
+            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+            out = cv2.VideoWriter(os.path.join(args.output, "visualization.mp4"), fourcc, 10.0, (W, H), True)
+            for _vis_output in visualized_output:
+                frame = _vis_output.get_image()[:, :, ::-1]
+                out.write(frame)
+            cap.release()
+            out.release()
 
     elif args.video_input:
         video = cv2.VideoCapture(args.video_input)
