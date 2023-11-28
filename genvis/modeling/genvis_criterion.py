@@ -165,10 +165,10 @@ class GenvisSetCriterion(nn.Module):
         for t in (clip_targets * L):
             target_masks.append(t['merged_masks'])
         target_masks = torch.cat(target_masks) # LB, Ht, Wt
-        LB, Ht, Wt = target_masks.shape
+        LBT, Ht, Wt = target_masks.shape
         
         pred_masks = pred_masks.reshape(L*B*T, 1, Hp, Wp)
-        target_masks = target_masks.reshape(LB*T, 1, Ht, Wt).to(dtype=torch.float16)
+        target_masks = target_masks.reshape(LBT, 1, Ht, Wt).to(dtype=torch.float16)
 
         with torch.no_grad():
             # sample point_coords
@@ -193,8 +193,8 @@ class GenvisSetCriterion(nn.Module):
         ).squeeze(1)
         
         
-        point_logits = point_logits.view(LB, T * self.num_points)
-        point_labels = point_labels.view(LB, T * self.num_points)
+        point_logits = point_logits.view(L*B, T * self.num_points)
+        point_labels = point_labels.view(L*B, T * self.num_points)
         
         losses = {
             "loss_fusion_mask": sigmoid_ce_loss_jit(point_logits, point_labels, num_masks),
@@ -397,8 +397,6 @@ class GenvisSetCriterion(nn.Module):
                 outputs, clip_targets, frame_targets, clip_indices, frame_indices, num_masks
             )
         if loss == 'genvis_fusion':
-            if 'pred_masks_fused' not in outputs:
-                pass
             return loss_map[loss](outputs['pred_masks_fused'], clip_targets, num_masks)
 
         return loss_map[loss](outputs, clip_targets, clip_indices, num_masks)
