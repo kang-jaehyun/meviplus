@@ -14,12 +14,12 @@ from .mevis import register_mevis_instances
 
 # ====    Predefined splits for mevis    ===========
 _PREDEFINED_SPLITS_mevis = {
-    "mevis_train": ("/home/jaehyunkang/meviplus/datasets/mevis/train",
-                   "/home/jaehyunkang/meviplus/datasets/mevis/train/meta_expressions.json"),
-    "mevis_val": ("/home/jaehyunkang/meviplus/datasets/mevis/valid_u",
-                 "/home/jaehyunkang/meviplus/datasets/mevis/valid_u/meta_expressions.json"),
-    "mevis_test": ("/home/jaehyunkang/meviplus/datasets/mevis/valid",
-                  "/home/jaehyunkang/meviplus/datasets/mevis/valid/meta_expressions.json"),
+    "mevis_train": ("mevis/train",
+                   "mevis/train/meta_expressions.json"),
+    "mevis_val": ("mevis/valid_u",
+                 "mevis/valid_u/meta_expressions.json"),
+    "mevis_test": ("mevis/valid",
+                  "mevis/valid/meta_expressions.json"),
 }
 
 

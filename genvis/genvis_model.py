@@ -10,11 +10,19 @@ from detectron2.structures import ImageList
 from detectron2.utils.memory import retry_if_cuda_oom
 
 from vita.vita_model import Vita
-from .modeling.genvis_criterion import GenvisSetCriterion
+from .modeling.genvis_criterion import GenvisSetCriterion, dice_loss_jit, sigmoid_ce_loss_jit
 from .modeling.genvis_matcher import GenvisHungarianMatcher
 from .modeling.genvis import GenVIS
 
 from transformers import BertModel, RobertaModel
+import clip
+
+from vita.modeling.transformer_decoder.vita import FFNLayer, CrossAttentionLayer, SelfAttentionLayer, MLP
+
+from detectron2.projects.point_rend.point_features import (
+    get_uncertain_point_coords_with_randomness,
+    point_sample,
+)
 
 @META_ARCH_REGISTRY.register()
 class Genvis(Vita):
@@ -24,8 +32,9 @@ class Genvis(Vita):
         self,
         len_clip_window: int,
         genvis_criterion: nn.Module,
-        lang_backbone: nn.Module,
-        feature_resizer: nn.Module,
+        text_encoder: nn.Module,
+        text_proj: nn.Module,
+        text_decoder: nn.Module,
         freeze_text_encoder: bool,
         **kwargs,
     ):
@@ -34,8 +43,9 @@ class Genvis(Vita):
         self.len_clip_window = len_clip_window
         self.genvis_criterion = genvis_criterion
         self.freeze_detector = kwargs["freeze_detector"]
-        # self.resizer = feature_resizer
-        self.text_encoder = lang_backbone
+        self.text_proj = text_proj
+        self.text_encoder = text_encoder
+        self.text_decoder = text_decoder
         if freeze_text_encoder:
             print("Freeze text encoder")
             for p in self.text_encoder.parameters():
@@ -52,7 +62,6 @@ class Genvis(Vita):
         dice_weight  = cfg.MODEL.MASK_FORMER.DICE_WEIGHT
         mask_weight  = cfg.MODEL.MASK_FORMER.MASK_WEIGHT
         sim_weight   = cfg.MODEL.VITA.SIM_WEIGHT
-        text_weight  = cfg.MODEL.GENVIS.TEXT_WEIGHT
         
         genvis_matcher = GenvisHungarianMatcher(
             cost_class=class_weight,
@@ -65,7 +74,6 @@ class Genvis(Vita):
             "loss_genvis_ce": class_weight, 
             "loss_genvis_mask": mask_weight, 
             "loss_genvis_dice": dice_weight,
-            "loss_genvis_text": text_weight,
         }
         if sim_weight > 0.0:
             genvis_weight_dict["loss_genvis_sim"] = sim_weight
@@ -75,7 +83,13 @@ class Genvis(Vita):
             for i in range(cfg.MODEL.VITA.DEC_LAYERS - 1):
                 aux_weight_dict.update({k + f"_{i}": v for k, v in genvis_weight_dict.items()})
             genvis_weight_dict.update(aux_weight_dict)
-        genvis_losses = ["genvis_labels", "genvis_masks", "genvis_texts"]
+        
+        genvis_losses = [
+            "genvis_labels", 
+            "genvis_masks",
+            "genvis_fusion",
+        ]
+        
         if sim_weight > 0.0:
             genvis_losses.append("fg_sim")
 
@@ -92,16 +106,32 @@ class Genvis(Vita):
             sim_use_clip=cfg.MODEL.VITA.SIM_USE_CLIP,
         )
         text_encoder = RobertaModel.from_pretrained('roberta-base')
-        resizer = FeatureResizer(
-            input_feat_size=768,
-            output_feat_size=cfg.MODEL.MASK_FORMER.HIDDEN_DIM,
-            dropout=0.1,
+        text_decoder = TextDecoder(
+            nheads=cfg.MODEL.TEXT_DECODER.NHEADS,
+            dim_feedforward=cfg.MODEL.TEXT_DECODER.DIM_FEEDFORWARD,
+            enc_layers=cfg.MODEL.TEXT_DECODER.ENC_LAYERS,
+            dec_layers=cfg.MODEL.TEXT_DECODER.DEC_LAYERS,
+            hidden_dim=cfg.MODEL.TEXT_DECODER.HIDDEN_DIM,
+            mask_dim=cfg.MODEL.SEM_SEG_HEAD.MASK_DIM,
+            num_frames=cfg.INPUT.SAMPLING_FRAME_NUM,
+        )
+        # resizer = FeatureResizer(
+        #     input_feat_size=768,
+        #     output_feat_size=cfg.MODEL.MASK_FORMER.HIDDEN_DIM,
+        #     dropout=0.1,
+        # )
+        text_proj = MLP(
+            input_dim = cfg.MODEL.TEXT_DECODER.TEXT_DIM,
+            hidden_dim = cfg.MODEL.TEXT_DECODER.TEXT_DIM,
+            output_dim = cfg.MODEL.MASK_FORMER.HIDDEN_DIM,
+            num_layers = cfg.MODEL.TEXT_DECODER.PROJ_LAYERS,
         )
         rets.update({
             "len_clip_window": cfg.MODEL.GENVIS.LEN_CLIP_WINDOW,
             "genvis_criterion": genvis_criterion,
-            "lang_backbone": text_encoder,
-            "feature_resizer": resizer,
+            "text_encoder": text_encoder,
+            "text_proj": text_proj,
+            "text_decoder": text_decoder,
             "freeze_text_encoder": cfg.MODEL.GENVIS.FREEZE_TEXT_ENCODER,
         })
 
@@ -114,17 +144,18 @@ class Genvis(Vita):
                 images.append(frame.to(self.device))
         images = [(x - self.pixel_mean) / self.pixel_std for x in images]
         images = ImageList.from_tensors(images, self.size_divisibility)
-        lang_emb = [x['lang_tokens'].to(self.device) for x in batched_inputs]
-        lang_emb = torch.cat(lang_emb, dim=0)
+        
+        text_emb = [x['lang_tokens'].to(self.device) for x in batched_inputs]
+        text_emb = torch.cat(text_emb, dim=0)
 
-        lang_mask = [x['lang_mask'].to(self.device) for x in batched_inputs]
-        lang_mask = torch.cat(lang_mask, dim=0)
+        text_mask = [x['lang_mask'].to(self.device) for x in batched_inputs]
+        text_mask = torch.cat(text_mask, dim=0)
 
         with torch.no_grad():
-            lang_feat_all = self.text_encoder(lang_emb, attention_mask=lang_mask) # B, Nl, 768
-            lang_feat = lang_feat_all.pooler_output
+            text_features_all = self.text_encoder(text_emb, attention_mask=text_mask)
+            text_features = text_features_all.pooler_output # B, tC
         
-        
+
         features = self.backbone(images.tensor)
         
         BT = len(images)
@@ -170,6 +201,7 @@ class Genvis(Vita):
         prev_clip_indices = None
         prev_aux_clip_indices = None
         output_q = self.vita_module.query_feat.weight.unsqueeze(1).repeat(1, L*B, 1) # cQ, LB, C
+        text_q = self.text_proj(text_features)[None].repeat(1, L, 1) # 1, LB, C
         
         for c_i in range(num_clips):
             clip_targets  = video_targets[c_i]
@@ -179,12 +211,15 @@ class Genvis(Vita):
             fg_indices_per_clip = fg_indices[c_i]
 
             vita_outputs, output_q = self.vita_module(frame_queries_per_clip.flatten(1,2), pre_memory, output_q)
-            print("lang_feat.shape", lang_feat.shape)
-            print("text_embed.shape", vita_outputs["pred_text_embed"].shape)
+            text_outputs, text_q = self.text_decoder(output_q, text_q)
+            pred_mask_embed_fused = text_outputs["pred_mask_embed"].reshape(L,B,C) 
+            
+            vita_outputs['pred_masks_fused'] = torch.einsum("lbc,btchw->lbthw", pred_mask_embed_fused, mask_features_per_clip) # L, B, T, H, W
             vita_outputs["pred_masks"] = torch.einsum("lbqc,btchw->lbqthw", vita_outputs["pred_mask_embed"], mask_features_per_clip)
+            
             for out in vita_outputs["aux_outputs"]:
                 out["pred_masks"] = torch.einsum("lbqc,btchw->lbqthw", out["pred_mask_embed"], mask_features_per_clip)
-
+                
             genvis_loss_dict, out_clip_indices, aux_clip_indices_list = self.genvis_criterion(
                                                                             outputs=vita_outputs, 
                                                                             clip_targets=clip_targets, 
@@ -192,17 +227,16 @@ class Genvis(Vita):
                                                                             frame_indices=fg_indices_per_clip, 
                                                                             prev_clip_indices=prev_clip_indices, 
                                                                             prev_aux_clip_indices=prev_aux_clip_indices,
-                                                                            lang_feats=lang_feat,
                                                                         )
             genvis_weight_dict = self.genvis_criterion.weight_dict
-
+            
             loss_dict_keys = list(genvis_loss_dict.keys())
             for k in loss_dict_keys:
                 if k in genvis_weight_dict:
                     genvis_loss = genvis_loss_dict.pop(k)
                     genvis_loss_dict[f"{k}_clip{c_i}"] = genvis_loss * genvis_weight_dict[k]
             losses.update(genvis_loss_dict)
-
+            
             # update memory
             pre_memory["k"].append(vita_outputs["pre_memory"]["k"])
             pre_memory["v"].append(vita_outputs["pre_memory"]["v"])
@@ -235,10 +269,13 @@ class Genvis(Vita):
         clip_target_splits = dict()
         for targets_per_video in clip_targets:
             labels = targets_per_video["labels"] # Ni (number of instances)
+            # texts = targets_per_video["texts"] # 1, Ct
             ids = targets_per_video["ids"] # Ni, T 
+            merged_masks = targets_per_video["merged_masks"] # T, H, W
             masks = targets_per_video["masks"] # Ni, T, H, W
             frame_idx = targets_per_video["frame_idx"] # T
 
+            # merged_masks_splits = merged_masks.split(clip_len, dim=0)
             masks_splits = masks.split(clip_len, dim=1)
             ids_splits = ids.split(clip_len, dim=1)
 
@@ -252,6 +289,8 @@ class Genvis(Vita):
 
                 clip_target_splits[clip_idx].append(
                     {
+                        # "texts" : texts,
+                        "merged_masks": merged_masks[clip_idx*clip_len:(clip_idx+1)*clip_len],
                         "labels": labels, "ids": _ids, "masks": _masks,
                         "video_len": targets_per_video["video_len"], 
                         "frame_idx": frame_idx[clip_idx*clip_len:(clip_idx+1)*clip_len],
@@ -390,24 +429,147 @@ class Genvis(Vita):
         }
 
         return processed_results
-
-class FeatureResizer(nn.Module):
-    """
-    This class takes as input a set of embeddings of dimension C1 and outputs a set of
-    embedding of dimension C2, after a linear transformation, dropout and normalization (LN).
-    """
-
-    def __init__(self, input_feat_size, output_feat_size, dropout, do_ln=True):
+    
+class TextDecoder(nn.Module):
+    def __init__(
+        self, 
+        nheads: int,
+        dim_feedforward: int,
+        enc_layers: int,
+        dec_layers: int,
+        hidden_dim: int,
+        mask_dim: int,
+        num_frames: int,
+        ):
+        """
+        
+        TextDecoder    
+        
+        """
+        
         super().__init__()
-        self.do_ln = do_ln
-        # Object feature encoding
-        self.fc = nn.Linear(input_feat_size, output_feat_size, bias=True)
-        self.layer_norm = nn.LayerNorm(output_feat_size, eps=1e-12)
-        self.dropout = nn.Dropout(dropout)
+        self.num_heads = nheads
+        self.enc_layers = enc_layers
+        self.num_layers = dec_layers
+        # self.transformer_self_attention_layers = nn.ModuleList()
+        self.transformer_cross_attention_layers = nn.ModuleList()
+        self.transformer_ffn_layers = nn.ModuleList()
+        self.decoder_norm = nn.LayerNorm(hidden_dim)
+        self.src_embed = nn.Identity()
+        self.mask_embed = MLP(hidden_dim, hidden_dim, mask_dim, 3)
+        self.num_frames = num_frames
+        
+        pre_norm = False
+        if enc_layers > 0:
+            self.enc_self_attn = nn.ModuleList()
+            self.enc_ffn = nn.ModuleList()
+            for _ in range(self.enc_layers):
+                self.enc_self_attn.append(
+                    SelfAttentionLayer(
+                        d_model=hidden_dim,
+                        nhead=nheads,
+                        dropout=0.0,
+                        normalize_before=pre_norm,
+                    ),
+                )
+                self.enc_ffn.append(
+                    FFNLayer(
+                        d_model=hidden_dim,
+                        dim_feedforward=dim_feedforward,
+                        dropout=0.0,
+                        normalize_before=pre_norm,
+                    )
+                )
+                
+        for _ in range(self.num_layers):
+            # self.transformer_self_attention_layers.append(
+            #     SelfAttentionLayer(
+            #         d_model=hidden_dim,
+            #         nhead=nheads,
+            #         dropout=0.0,
+            #         normalize_before=pre_norm,
+            #     )
+            # )
 
-    def forward(self, encoder_features):
-        x = self.fc(encoder_features)
-        if self.do_ln:
-            x = self.layer_norm(x)
-        output = self.dropout(x)
-        return output
+            self.transformer_cross_attention_layers.append(
+                CrossAttentionLayer(
+                    d_model=hidden_dim,
+                    nhead=nheads,
+                    dropout=0.0,
+                    normalize_before=pre_norm,
+                )
+            )
+
+            self.transformer_ffn_layers.append(
+                FFNLayer(
+                    d_model=hidden_dim,
+                    dim_feedforward=dim_feedforward,
+                    dropout=0.0,
+                    normalize_before=pre_norm,
+                )
+            )
+    def encode_clip_query(self, clip_q):
+        """
+        input shape (frame_query)   : cQ, LB, C
+        output shape (frame_query)  : cQ, LB, C
+        """
+
+        # Not using window-based attention if self.window_size == 0.
+
+        # return_shape = frame_query.shape        # cQ, LB, C
+
+
+        for i in range(self.enc_layers):
+            clip_q = self.enc_self_attn[i](clip_q)
+            clip_q = self.enc_ffn[i](clip_q)
+
+        # clip_q = frame_query.view(return_shape)
+        return clip_q
+        
+    def forward(self, clip_q, output):
+        # clip_q : cQ, LB, C
+        # output : 1, LB, C (projected text features)
+        if not self.training:
+            clip_q = clip_q[[-1]]
+        
+        cQ, LB, C = clip_q.shape
+        _, LB, C = output.shape
+        # L = LB // B
+        clip_q = self.encode_clip_query(clip_q) # cQ, LB, C
+        src = self.src_embed(clip_q) # cQ, LB, C
+        
+        # decoder_outputs = []
+        for i in range(self.num_layers):
+            # attention: cross-attention first
+            output = self.transformer_cross_attention_layers[i](
+                output, src,
+                memory_mask=None,
+                memory_key_padding_mask=None,
+                pos=None, query_pos=None
+            )
+
+            # output = self.transformer_self_attention_layers[i](
+            #     output, tgt_mask=None,
+            #     tgt_key_padding_mask=None,
+            #     query_pos=query_embed
+            # )
+
+            # FFN
+            output = self.transformer_ffn_layers[i](
+                output
+            )
+            output = self.decoder_norm(output)
+            
+            # if (self.training and self.aux_loss) or (i == self.num_layers - 1):
+            #     dec_out = self.decoder_norm(output) # cQ, LB, C
+            #     dec_out = dec_out.transpose(0, 1)   # LB, cQ, C
+            #     decoder_outputs.append(dec_out.view(L, B, self.num_queries, C))
+        
+        pred_mask_embed = self.mask_embed(output)
+        
+        out = {
+            'pred_mask_embed' : pred_mask_embed
+        }
+        
+        
+        return out, output

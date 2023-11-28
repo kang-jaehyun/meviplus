@@ -4,7 +4,7 @@ import torch
 from torch import nn, Tensor
 from torch.nn import functional as F
 
-from vita.modeling.transformer_decoder.vita import VITA
+from vita.modeling.transformer_decoder.vita import VITA, MLP
 
 class GenVIS(VITA):
     def __init__(self, cfg):
@@ -17,8 +17,6 @@ class GenVIS(VITA):
         self.num_frames = cfg.MODEL.GENVIS.LEN_CLIP_WINDOW
         hidden_dim = cfg.MODEL.VITA.HIDDEN_DIM
         text_hidden_dim = cfg.MODEL.GENVIS.TEXT_HIDDEN_DIM
-        
-        self.text_projection = nn.Linear(hidden_dim, text_hidden_dim)
 
         self.pre_memory_embed_k = nn.Linear(hidden_dim, hidden_dim)
         self.pre_memory_embed_v = nn.Linear(hidden_dim, hidden_dim)
@@ -126,7 +124,7 @@ class GenVIS(VITA):
         pred_cls = self.class_embed(decoder_outputs)
         pred_mask_embed = self.mask_embed(decoder_outputs)
         
-        pred_text_embed = self.text_projection(decoder_outputs)
+        # pred_text_embed = self.text_projection(decoder_outputs)
         
         if self.use_sim and self.sim_use_clip:
             pred_cq_embed = self.sim_embed_clip(decoder_outputs)
@@ -139,7 +137,7 @@ class GenVIS(VITA):
         pre_memory_v = self.pre_memory_embed_v(memory_input)[None] # 1, L, B, cQ, C
 
         out = {
-            'pred_text_embed': pred_text_embed,
+            # 'pred_text_embed': pred_text_embed[-1],
             'pred_logits': pred_cls[-1],
             'pred_mask_embed': pred_mask_embed[-1],
             'pred_fq_embed': pred_fq_embed,

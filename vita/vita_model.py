@@ -303,11 +303,23 @@ class Vita(nn.Module):
         frame_gt_instances = []
         clip_gt_instances = []
         for targets_per_video in targets:
+            # lang_emb = targets_per_video['lang_tokens'].to(self.device)
+            # lang_mask = targets_per_video['lang_mask'].to(self.device)
+            # with torch.no_grad():
+                # lang_feat_all = self.text_encoder(lang_emb, attention_mask=lang_mask) # B, Nl, 768
+                # lang_feat = lang_feat_all.pooler_output
+                
             _num_instance = len(targets_per_video["instances"][0])
             mask_shape = [_num_instance, self.num_frames, h_pad, w_pad]
             gt_masks_per_video = torch.zeros(mask_shape, dtype=torch.bool, device=self.device)
-
+            gt_merged_masks_per_video = torch.zeros(mask_shape[1:], dtype=torch.bool, device=self.device)
             gt_classes_per_video = targets_per_video["instances"][0].gt_classes.to(self.device)
+            
+            for f in range(self.num_frames):
+                merged_h, merged_w = targets_per_video["gt_masks_merge"][f].shape[-2:]
+                # need to check -> merged h, merged w
+                gt_merged_masks_per_video[f, :merged_h, :merged_w] = targets_per_video['gt_masks_merge'][f]
+            
             gt_ids_per_video = []
             for f_i, targets_per_frame in enumerate(targets_per_video["instances"]):
                 targets_per_frame = targets_per_frame.to(self.device)
@@ -330,7 +342,7 @@ class Vita(nn.Module):
             gt_ids_per_video = gt_ids_per_video[valid_bool_clip].long()         # N, num_frames
             gt_masks_per_video = gt_masks_per_video[valid_bool_clip].float()    # N, num_frames, H, W
             valid_bool_frame = valid_bool_frame[valid_bool_clip]
-
+            
             if len(gt_ids_per_video) > 0:
                 min_id = max(gt_ids_per_video[valid_bool_frame].min(), 0)
                 gt_ids_per_video[valid_bool_frame] -= min_id
@@ -339,6 +351,8 @@ class Vita(nn.Module):
                 {
                     "labels": gt_classes_per_video, "ids": gt_ids_per_video, "masks": gt_masks_per_video,
                     "video_len": targets_per_video["video_len"], "frame_idx": targets_per_video["frame_idx"],
+                    "merged_masks": gt_merged_masks_per_video,
+                    # 'texts' : lang_feat,
                 }
             )
 
