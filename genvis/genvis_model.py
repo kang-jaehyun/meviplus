@@ -15,7 +15,7 @@ from .modeling.genvis_matcher import GenvisHungarianMatcher
 from .modeling.genvis import GenVIS
 
 from transformers import BertModel, RobertaModel
-import clip
+# import clip
 
 from vita.modeling.transformer_decoder.vita import FFNLayer, CrossAttentionLayer, SelfAttentionLayer, MLP
 
@@ -62,6 +62,8 @@ class Genvis(Vita):
         dice_weight  = cfg.MODEL.MASK_FORMER.DICE_WEIGHT
         mask_weight  = cfg.MODEL.MASK_FORMER.MASK_WEIGHT
         sim_weight   = cfg.MODEL.VITA.SIM_WEIGHT
+        fusion_mask_weight = cfg.MODEL.GENVIS.FUSION_MASK_WEIGHT
+        fusion_dice_weight = cfg.MODEL.GENVIS.FUSION_DICE_WEIGHT
         
         genvis_matcher = GenvisHungarianMatcher(
             cost_class=class_weight,
@@ -74,6 +76,8 @@ class Genvis(Vita):
             "loss_genvis_ce": class_weight, 
             "loss_genvis_mask": mask_weight, 
             "loss_genvis_dice": dice_weight,
+            "loss_fusion_mask": fusion_mask_weight,
+            "loss_fusion_dice": fusion_dice_weight,
         }
         if sim_weight > 0.0:
             genvis_weight_dict["loss_genvis_sim"] = sim_weight
