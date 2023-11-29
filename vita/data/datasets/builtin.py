@@ -16,10 +16,14 @@ from .mevis import register_mevis_instances
 _PREDEFINED_SPLITS_mevis = {
     "mevis_train": ("mevis/train",
                    "mevis/train/meta_expressions.json"),
-    "mevis_val": ("mevis/valid_u",
-                 "mevis/valid_u/meta_expressions.json"),
-    "mevis_test": ("mevis/valid",
-                  "mevis/valid/meta_expressions.json"),
+    "mevis_debug": ("mevis/dummy",
+                     "mevis/dummy/meta_expressions.json"),
+    "mevis_val": ("mevis/valid",
+                 "mevis/valid/meta_expressions.json"),
+    "mevis_test": ("mevis/test",
+                  "mevis/test/meta_expressions.json"),
+    "mevis_val_single": ("mevis/valid_single",
+                 "mevis/valid_single/meta_expressions.json"),
 }
 
 
