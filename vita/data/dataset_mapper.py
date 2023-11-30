@@ -245,7 +245,8 @@ class MeViSDatasetMapper:
         video_annos = dataset_dict.pop("annotations", None)
         file_names = dataset_dict.pop("file_names", None)
 
-        if self.is_train:
+        # if self.is_train:
+        if video_annos is not None:
             _ids = set()
             for frame_idx in selected_idx:
                 _ids.update([anno["id"] for anno in video_annos[frame_idx]])
@@ -278,7 +279,8 @@ class MeViSDatasetMapper:
             # Therefore it's important to use torch.Tensor.
             dataset_dict["image"].append(torch.as_tensor(np.ascontiguousarray(image.transpose(2, 0, 1))))
 
-            if (video_annos is None) or (not self.is_train):
+            # if (video_annos is None) or (not self.is_train):
+            if video_annos is None:
                 continue
 
             # NOTE copy() is to prevent annotations getting changed from applying augmentations

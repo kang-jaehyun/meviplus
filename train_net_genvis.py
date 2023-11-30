@@ -48,6 +48,7 @@ from vita import (
     build_detection_train_loader,
     build_detection_test_loader,
     add_vita_config,
+    MeViSEvaluator,
 )
 
 from genvis import add_genvis_config
@@ -75,7 +76,9 @@ class Trainer(DefaultTrainer):
             evaluator_list.append(COCOEvaluator(dataset_name, cfg, True, output_folder))
         elif evaluator_type == "ytvis":
             evaluator_list.append(YTVISEvaluator(dataset_name, cfg, True, output_folder))
-
+        elif evaluator_type == "mevis":
+            evaluator_list.append(MeViSEvaluator(dataset_name, cfg, True, output_folder))
+            
         if len(evaluator_list) == 0:
             raise NotImplementedError(
                 "no Evaluator for the dataset {} with the type {}".format(
@@ -127,6 +130,8 @@ class Trainer(DefaultTrainer):
             mapper = CocoClipDatasetMapper(cfg, is_train=False)
         elif dataset_name.startswith('ytvis') or dataset_name.startswith('ovis'):
             mapper = YTVISDatasetMapper(cfg, is_train=False)
+        elif dataset_name.startswith('mevis') or dataset_name.startswith('ovis'):
+            mapper = MeViSDatasetMapper(cfg, is_train=False)
         return build_detection_test_loader(cfg, dataset_name, mapper=mapper)
 
     @classmethod
