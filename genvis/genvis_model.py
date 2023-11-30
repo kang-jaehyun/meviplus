@@ -348,26 +348,50 @@ class Genvis(Vita):
         pre_memory = {"k": [], "v": []}
 
         output_q = self.vita_module.query_feat.weight.unsqueeze(1).repeat(1, 1, 1) # cQ, LB, C
+        
+        text_emb = batched_inputs['lang_tokens'].to(self.device)
+        text_mask = batched_inputs['lang_mask'].to(self.device)
+
+        with torch.no_grad():
+            text_features_all = self.text_encoder(text_emb, attention_mask=text_mask)
+            text_features = text_features_all.pooler_output # B, tC
+        
+        text_q = self.text_proj(text_features)[None] # 1, B, C
+        pred_masks = []
+        
         for i in range(math.ceil(num_frames / self.len_clip_window)):
             images = batched_inputs["image"][i*self.len_clip_window : (i+1)*self.len_clip_window]
             images = [(x.to(self.device) - self.pixel_mean) / self.pixel_std for x in images]
             images = ImageList.from_tensors(images, self.size_divisibility)
 
+
+
             features = self.backbone(images.tensor)
             outputs, frame_queries, _mask_features = self.sem_seg_head(features)
-
+            L, BT, fQ, C = frame_queries.shape
+            
+            if i == 0:
+                # first clip
+                text_q = text_q.repeat(1, L, 1) # 1, LB, C
+            
             vita_outputs, output_q = self.vita_module(frame_queries, pre_memory, output_q)
-
+            text_outputs, text_q = self.text_decoder(output_q, text_q)
+            pred_mask_embed_fused = text_outputs["pred_mask_embed"].reshape(L, C)
+            
+            
             # BT is 1 as runs per frame
             _mask_features = self.vita_module.vita_mask_features(_mask_features)
-            mask_features.append(_mask_features)  # T', C, H, W
-
-            mask_cls.append(vita_outputs["pred_logits"][-1])       # 1, cQ, K+1
-            mask_embed.append(vita_outputs["pred_mask_embed"][-1]) # 1, cQ, C
+            # mask_features.append(_mask_features)  # T', C, H, W
+            
+            pred_masks_fused = torch.einsum("lc,tchw->lthw", pred_mask_embed_fused, _mask_features) # L, T, H, W
+            # mask_cls.append(vita_outputs["pred_logits"][-1])       # 1, cQ, K+1
+            # mask_embed.append(vita_outputs["pred_mask_embed"][-1]) # 1, cQ, C
 
             # update memory
             pre_memory["k"].append(vita_outputs["pre_memory"]["k"])
             pre_memory["v"].append(vita_outputs["pre_memory"]["v"])
+            pred_masks.append(pred_masks_fused)
+            
             del vita_outputs
 
         interim_size = images.tensor.shape[-2:]
@@ -378,58 +402,75 @@ class Genvis(Vita):
 
         del outputs, images, batched_inputs
 
-        mask_cls   = torch.cat(mask_cls)   # NUM_CLIP, cQ, K+1
-        mask_embed = torch.cat(mask_embed) # NUM_CLIP, cQ, C
+        # mask_cls   = torch.cat(mask_cls)   # NUM_CLIP, cQ, K+1
+        # mask_embed = torch.cat(mask_embed) # NUM_CLIP, cQ, C
 
-        labels = torch.arange(self.sem_seg_head.num_classes, device=self.device).unsqueeze(0).repeat(self.num_queries, 1).flatten(0, 1)
-        num_topk = self.test_topk_per_image
+        # labels = torch.arange(self.sem_seg_head.num_classes, device=self.device).unsqueeze(0).repeat(self.num_queries, 1).flatten(0, 1)
+        # num_topk = self.test_topk_per_image
 
-        scores = F.softmax(mask_cls, dim=-1)[:, :, :-1] # NUM_CLIP, cQ, K
-        scores_per_video, _ = scores.max(dim=0)
-        scores_per_video, topk_indices = scores_per_video.flatten().topk(num_topk, sorted=False)
+        # scores = F.softmax(mask_cls, dim=-1)[:, :, :-1] # NUM_CLIP, cQ, K
+        # scores_per_video, _ = scores.max(dim=0)
+        # scores_per_video, topk_indices = scores_per_video.flatten().topk(num_topk, sorted=False)
 
-        labels_per_video = labels[topk_indices]
-        topk_indices = torch.div(topk_indices, self.sem_seg_head.num_classes, rounding_mode='floor')
+        # labels_per_video = labels[topk_indices]
+        # topk_indices = torch.div(topk_indices, self.sem_seg_head.num_classes, rounding_mode='floor')
 
-        mask_embed = mask_embed[:, topk_indices]
+        # mask_embed = mask_embed[:, topk_indices]
 
         masks_per_video = []
-        numerator   = torch.zeros(len(topk_indices), dtype=torch.float, device=self.device)
-        denominator = torch.zeros(len(topk_indices), dtype=torch.float, device=self.device)
+        # numerator   = torch.zeros(len(topk_indices), dtype=torch.float, device=self.device)
+        # denominator = torch.zeros(len(topk_indices), dtype=torch.float, device=self.device)
 
-        for i in range(math.ceil(num_frames/self.len_clip_window)):
-            mask_pred = torch.einsum("qc,tchw->qthw", mask_embed[i], mask_features[i])
+        mask_pred = torch.cat(pred_masks, dim=1)
+        
+        # upsample masks
+        mask_pred = retry_if_cuda_oom(F.interpolate)(
+            mask_pred,
+            size=interim_size,
+            mode="bilinear",
+            align_corners=False,
+        ) # L, T, H, W
+        
+        mask_pred = mask_pred[:, :, : image_size[0], : image_size[1]]
+        mask_pred = F.interpolate(
+            mask_pred, size=(out_height, out_width), mode="bilinear", align_corners=False
+        ) > 0.
+        
+        
+        # for i in range(math.ceil(num_frames/self.len_clip_window)):
+        #     mask_pred = torch.einsum("qc,tchw->qthw", mask_embed[i], mask_features[i])
 
-            # upsample masks
-            mask_pred = retry_if_cuda_oom(F.interpolate)(
-                mask_pred,
-                size=interim_size,
-                mode="bilinear",
-                align_corners=False,
-            ) # cQ, T, H, W
+        #     # upsample masks
+        #     mask_pred = retry_if_cuda_oom(F.interpolate)(
+        #         mask_pred,
+        #         size=interim_size,
+        #         mode="bilinear",
+        #         align_corners=False,
+        #     ) # cQ, T, H, W
 
-            mask_pred = mask_pred[:, :, : image_size[0], : image_size[1]]
+        #     mask_pred = mask_pred[:, :, : image_size[0], : image_size[1]]
 
-            interim_mask_soft = mask_pred.sigmoid()
-            interim_mask_hard = interim_mask_soft > 0.5
+        #     interim_mask_soft = mask_pred.sigmoid()
+        #     interim_mask_hard = interim_mask_soft > 0.5
 
-            numerator   += (interim_mask_soft.flatten(1) * interim_mask_hard.flatten(1)).sum(1)
-            denominator += interim_mask_hard.flatten(1).sum(1)
+        #     numerator   += (interim_mask_soft.flatten(1) * interim_mask_hard.flatten(1)).sum(1)
+        #     denominator += interim_mask_hard.flatten(1).sum(1)
 
-            mask_pred = F.interpolate(
-                mask_pred, size=(out_height, out_width), mode="bilinear", align_corners=False
-            ) > 0.
+        #     mask_pred = F.interpolate(
+        #         mask_pred, size=(out_height, out_width), mode="bilinear", align_corners=False
+        #     ) > 0.
 
-            masks_per_video.append(mask_pred.to(to_store))
+            # masks_per_video.append(mask_pred.to(to_store))
 
-        masks_per_video   = torch.cat(masks_per_video, dim=1).cpu()
-        scores_per_video *= (numerator / (denominator + 1e-6))
+        # masks_per_video   = torch.cat(masks_per_video, dim=1).cpu()
+        # scores_per_video *= (numerator / (denominator + 1e-6))
 
         processed_results = {
             "image_size": (out_height, out_width),
-            "pred_scores": scores_per_video.tolist(),
-            "pred_labels": labels_per_video.tolist(),
-            "pred_masks": masks_per_video,
+            # "pred_scores": scores_per_video.tolist(),
+            # "pred_labels": labels_per_video.tolist(),
+            # "pred_masks": mask_pred.cpu(),
+            "pred_masks": mask_pred,
         }
 
         return processed_results
