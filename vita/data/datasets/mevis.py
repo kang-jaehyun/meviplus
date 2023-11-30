@@ -33,7 +33,7 @@ def load_mevis_json(image_root, json_file):
     with open(str(ann_file), 'r') as f:
         subset_expressions_by_video = json.load(f)['videos']
     videos = list(subset_expressions_by_video.keys())
-    print('number of video in the datasets:{}'.format(len(videos)))
+    print('number of video in the datasets : {}'.format(len(videos)))
     metas = []
     if image_root.split('/')[-1] == 'train':
         mask_json = os.path.join(image_root, 'mask_dict.json')
@@ -58,7 +58,7 @@ def load_mevis_json(image_root, json_file):
                 meta['category'] = 0
                 meta['length'] = vid_len
                 metas.append(meta)
-    else:
+    elif image_root.split('/')[-1] == 'test':
         for vid in videos:
             vid_data = subset_expressions_by_video[vid]
             vid_frames = sorted(vid_data['frames'])
@@ -69,6 +69,29 @@ def load_mevis_json(image_root, json_file):
                 meta['exp'] = exp_dict['exp']
                 meta['obj_id'] = -1
                 meta['anno_id'] = -1
+                meta['frames'] = vid_frames
+                meta['exp_id'] = exp_id
+                meta['category'] = 0
+                meta['length'] = vid_len
+                metas.append(meta)
+    else: # valid or valid_single
+        mask_json = os.path.join(image_root, 'mask_dict.json')
+        print(f'Loading masks form {mask_json} ...')
+        with open(mask_json) as fp:
+            mask_dict = json.load(fp)
+
+        for vid in videos:
+            vid_data = subset_expressions_by_video[vid]
+            vid_frames = sorted(vid_data['frames'])
+            vid_len = len(vid_frames)
+            if vid_len < 2:
+                continue
+            for exp_id, exp_dict in vid_data['expressions'].items():
+                meta = {}
+                meta['video'] = vid
+                meta['exp'] = exp_dict['exp']
+                meta['obj_id'] = [int(x) for x in exp_dict['obj_id']]
+                meta['anno_id'] = [str(x) for x in exp_dict['anno_id']]
                 meta['frames'] = vid_frames
                 meta['exp_id'] = exp_id
                 meta['category'] = 0
@@ -88,7 +111,7 @@ def load_mevis_json(image_root, json_file):
             record["eval_idx"] = vid_dict["eval_idx"]
 
         video_objs = []
-        if image_root.split('/')[-1] == 'train':
+        if image_root.split('/')[-1] != 'test':
             for frame_idx in range(record["length"]):
                 frame_objs = []
                 for x, obj_id in zip(anno_ids, obj_ids):
@@ -150,7 +173,7 @@ def register_mevis_instances(name, json_file, image_root):
     # 2. Optionally, add metadata about this dataset,
     # since they might be useful in evaluation, visualization or logging
     MetadataCatalog.get(name).set(
-        json_file=json_file, image_root=image_root, evaluator_type="ytvis")
+        json_file=json_file, image_root=image_root, evaluator_type="mevis")
 
 
 if __name__ == "__main__":
