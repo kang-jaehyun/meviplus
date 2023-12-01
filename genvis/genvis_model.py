@@ -33,7 +33,7 @@ class Genvis(Vita):
         len_clip_window: int,
         genvis_criterion: nn.Module,
         text_encoder: nn.Module,
-        text_proj: nn.Module,
+        vis2text: nn.Module,
         text_decoder: nn.Module,
         freeze_text_encoder: bool,
         **kwargs,
@@ -43,9 +43,10 @@ class Genvis(Vita):
         self.len_clip_window = len_clip_window
         self.genvis_criterion = genvis_criterion
         self.freeze_detector = kwargs["freeze_detector"]
-        self.text_proj = text_proj
+        self.vis2text = vis2text
         self.text_encoder = text_encoder
         self.text_decoder = text_decoder
+        
         if freeze_text_encoder:
             print("Freeze text encoder")
             for p in self.text_encoder.parameters():
@@ -124,17 +125,19 @@ class Genvis(Vita):
         #     output_feat_size=cfg.MODEL.MASK_FORMER.HIDDEN_DIM,
         #     dropout=0.1,
         # )
-        text_proj = MLP(
-            input_dim = cfg.MODEL.TEXT_DECODER.TEXT_DIM,
+        
+        vis2text = MLP(
+            input_dim = cfg.MODEL.MASK_FORMER.HIDDEN_DIM,
             hidden_dim = cfg.MODEL.TEXT_DECODER.TEXT_DIM,
-            output_dim = cfg.MODEL.MASK_FORMER.HIDDEN_DIM,
+            output_dim = cfg.MODEL.TEXT_DECODER.TEXT_DIM,
             num_layers = cfg.MODEL.TEXT_DECODER.PROJ_LAYERS,
         )
+
         rets.update({
             "len_clip_window": cfg.MODEL.GENVIS.LEN_CLIP_WINDOW,
             "genvis_criterion": genvis_criterion,
             "text_encoder": text_encoder,
-            "text_proj": text_proj,
+            "vis2text": vis2text,
             "text_decoder": text_decoder,
             "freeze_text_encoder": cfg.MODEL.GENVIS.FREEZE_TEXT_ENCODER,
         })
@@ -205,7 +208,8 @@ class Genvis(Vita):
         prev_clip_indices = None
         prev_aux_clip_indices = None
         output_q = self.vita_module.query_feat.weight.unsqueeze(1).repeat(1, L*B, 1) # cQ, LB, C
-        text_q = self.text_proj(text_features)[None].repeat(1, L, 1) # 1, LB, C
+        # text_q = self.text_proj(text_features)[None].repeat(1, L, 1) # 1, LB, C
+        text_q = text_features[None].repeat(1, L, 1) # 1, LB, tC
         
         for c_i in range(num_clips):
             clip_targets  = video_targets[c_i]
@@ -215,7 +219,8 @@ class Genvis(Vita):
             fg_indices_per_clip = fg_indices[c_i]
 
             vita_outputs, output_q = self.vita_module(frame_queries_per_clip.flatten(1,2), pre_memory, output_q)
-            text_outputs, text_q = self.text_decoder(output_q, text_q)
+            output_q_proj = self.vis2text(output_q) # LB, tC
+            text_outputs, text_q = self.text_decoder(output_q_proj, text_q)
             pred_mask_embed_fused = text_outputs["pred_mask_embed"].reshape(L,B,C) 
             
             vita_outputs['pred_masks_fused'] = torch.einsum("lbc,btchw->lbthw", pred_mask_embed_fused, mask_features_per_clip) # L, B, T, H, W
@@ -356,7 +361,7 @@ class Genvis(Vita):
             text_features_all = self.text_encoder(text_emb, attention_mask=text_mask)
             text_features = text_features_all.pooler_output # B, tC
         
-        text_q = self.text_proj(text_features)[None] # 1, B, C
+        text_q = text_features[None] # 1, B, tC
         pred_masks = []
         
         for i in range(math.ceil(num_frames / self.len_clip_window)):
@@ -372,12 +377,12 @@ class Genvis(Vita):
             
             if i == 0:
                 # first clip
-                text_q = text_q.repeat(1, L, 1) # 1, LB, C
+                text_q = text_q.repeat(1, L, 1) # 1, LB, tC
             
             vita_outputs, output_q = self.vita_module(frame_queries, pre_memory, output_q)
-            text_outputs, text_q = self.text_decoder(output_q, text_q)
-            pred_mask_embed_fused = text_outputs["pred_mask_embed"].reshape(L, C)
-            
+            output_q_proj = self.vis2text(output_q) # LB, tC
+            text_outputs, text_q = self.text_decoder(output_q_proj, text_q)
+            pred_mask_embed_fused = text_outputs["pred_mask_embed"].reshape(L,C) 
             
             # BT is 1 as runs per frame
             _mask_features = self.vita_module.vita_mask_features(_mask_features)
@@ -482,7 +487,7 @@ class TextDecoder(nn.Module):
         dim_feedforward: int,
         enc_layers: int,
         dec_layers: int,
-        hidden_dim: int,
+        hidden_dim: int, # text dim
         mask_dim: int,
         num_frames: int,
         ):
@@ -555,8 +560,8 @@ class TextDecoder(nn.Module):
             )
     def encode_clip_query(self, clip_q):
         """
-        input shape (frame_query)   : cQ, LB, C
-        output shape (frame_query)  : cQ, LB, C
+        input shape (frame_query)   : cQ, LB, tC
+        output shape (frame_query)  : cQ, LB, tC
         """
 
         # Not using window-based attention if self.window_size == 0.
@@ -572,16 +577,16 @@ class TextDecoder(nn.Module):
         return clip_q
         
     def forward(self, clip_q, output):
-        # clip_q : cQ, LB, C
-        # output : 1, LB, C (projected text features)
+        # clip_q : cQ, LB, tC
+        # output : 1, LB, tC (projected text features)
         if not self.training:
             clip_q = clip_q[[-1]]
         
-        cQ, LB, C = clip_q.shape
-        _, LB, C = output.shape
+        cQ, LB, tC = clip_q.shape
+        _, LB, tC = output.shape
         # L = LB // B
-        clip_q = self.encode_clip_query(clip_q) # cQ, LB, C
-        src = self.src_embed(clip_q) # cQ, LB, C
+        clip_q = self.encode_clip_query(clip_q) # cQ, LB, tC
+        src = self.src_embed(clip_q) # cQ, LB, tC
         
         # decoder_outputs = []
         for i in range(self.num_layers):
