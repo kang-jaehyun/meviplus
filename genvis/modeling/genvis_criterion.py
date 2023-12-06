@@ -155,20 +155,20 @@ class GenvisSetCriterion(nn.Module):
     #     losses = {'loss_genvis_text': loss_text}
         
     #     return losses
-    def loss_fusion(self, pred_masks, clip_targets, num_masks):
+    def loss_fusion(self, pred_masks, video_targets, num_masks):
         """
 
         """
-        L,B,T,Hp,Wp = pred_masks.shape
+        cN,B,T,Hp,Wp = pred_masks.shape
         
         target_masks = []
-        for t in (clip_targets * L):
+        for t in (video_targets):
             target_masks.append(t['merged_masks'])
-        target_masks = torch.cat(target_masks) # LB, Ht, Wt
-        LBT, Ht, Wt = target_masks.shape
+        target_masks = torch.cat(target_masks) # B*cN*T, Ht, Wt
+        BcNT, Ht, Wt = target_masks.shape
         
-        pred_masks = pred_masks.reshape(L*B*T, 1, Hp, Wp)
-        target_masks = target_masks.reshape(LBT, 1, Ht, Wt).to(dtype=torch.float16)
+        pred_masks = pred_masks.reshape(cN*B*T, 1, Hp, Wp)
+        target_masks = target_masks.reshape(BcNT, 1, Ht, Wt).to(dtype=torch.float16)
 
         with torch.no_grad():
             # sample point_coords
@@ -193,8 +193,8 @@ class GenvisSetCriterion(nn.Module):
         ).squeeze(1)
         
         
-        point_logits = point_logits.view(L*B, T * self.num_points)
-        point_labels = point_labels.view(L*B, T * self.num_points)
+        point_logits = point_logits.view(cN*B, T * self.num_points)
+        point_labels = point_labels.view(cN*B, T * self.num_points)
         
         losses = {
             "loss_fusion_mask": sigmoid_ce_loss_jit(point_logits, point_labels, num_masks),
