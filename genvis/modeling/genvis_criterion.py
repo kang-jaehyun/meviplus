@@ -167,7 +167,7 @@ class GenvisSetCriterion(nn.Module):
         target_masks = torch.cat(target_masks) # B*cN*T, Ht, Wt
         BcNT, Ht, Wt = target_masks.shape
         
-        pred_masks = pred_masks.reshape(cN*B*T, 1, Hp, Wp)
+        pred_masks = pred_masks.permute(1,0,2,3,4).reshape(cN*B*T, 1, Hp, Wp)
         target_masks = target_masks.reshape(BcNT, 1, Ht, Wt).to(dtype=torch.float16)
 
         with torch.no_grad():
