@@ -130,7 +130,7 @@ def load_mevis_json(image_root, json_file):
                     frame_objs.append(obj)
                 video_objs.append(frame_objs)
         record["annotations"] = video_objs
-        record["sentence"] = exp
+        record["expressions"] = exp
         record["exp_id"] = exp_id
         record["video_name"] = video_name
         dataset_dicts.append(record)

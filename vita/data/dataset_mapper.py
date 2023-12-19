@@ -182,9 +182,9 @@ class MeViSDatasetMapper:
         logger = logging.getLogger(__name__)
         mode = "training" if is_train else "inference"
         logger.info(f"[DatasetMapper] Augmentations used in {mode}: {augmentations}")
-        self.max_tokens = 40
+        # self.max_tokens = 40
         # self.tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
-        self.tokenizer = RobertaTokenizerFast.from_pretrained('roberta-base')
+        # self.tokenizer = RobertaTokenizerFast.from_pretrained('roberta-base')
 
     @classmethod
     def from_config(cls, cfg, is_train: bool = True, is_tgt: bool = True):
@@ -321,17 +321,17 @@ class MeViSDatasetMapper:
             dataset_dict['gt_masks_merge'].append(self._merge_masks(instances.gt_masks.tensor))
             dataset_dict["instances"].append(instances)
 
-        sentence_raw = dataset_dict['sentence']
-        attention_mask = [0] * self.max_tokens
-        padded_input_ids = [0] * self.max_tokens
+        # sentence_raw = dataset_dict['sentence']
+        # attention_mask = [0] * self.max_tokens
+        # padded_input_ids = [0] * self.max_tokens
 
-        input_ids = self.tokenizer.encode(text=sentence_raw, add_special_tokens=True)
+        # input_ids = self.tokenizer.encode(text=sentence_raw, add_special_tokens=True)
 
-        input_ids = input_ids[:self.max_tokens]
-        padded_input_ids[:len(input_ids)] = input_ids
-        attention_mask[:len(input_ids)] = [1] * len(input_ids)
-        dataset_dict['lang_tokens'] = torch.tensor(padded_input_ids).unsqueeze(0)
-        dataset_dict['lang_mask'] = torch.tensor(attention_mask).unsqueeze(0)
+        # input_ids = input_ids[:self.max_tokens]
+        # padded_input_ids[:len(input_ids)] = input_ids
+        # attention_mask[:len(input_ids)] = [1] * len(input_ids)
+        # dataset_dict['lang_tokens'] = torch.tensor(padded_input_ids).unsqueeze(0)
+        # dataset_dict['lang_mask'] = torch.tensor(attention_mask).unsqueeze(0)
         dataset_dict['dataset_name'] = 'mevis'
         return dataset_dict
 
@@ -422,6 +422,10 @@ class YTVISDatasetMapper:
         mode = "training" if is_train else "inference"
         logger.info(f"[DatasetMapper] Augmentations used in {mode}: {augmentations}")
 
+    @staticmethod
+    def _merge_masks(x):
+        return x.sum(dim=0, keepdim=True).clamp(max=1)
+    
     @classmethod
     def from_config(cls, cfg, is_train: bool = True, is_tgt: bool = True):
         augs = build_augmentation(cfg, is_train)
@@ -484,12 +488,14 @@ class YTVISDatasetMapper:
             ids = dict()
             for i, _id in enumerate(_ids):
                 ids[_id] = i
-
+        
         dataset_dict["video_len"] = len(video_annos)
         dataset_dict["frame_idx"] = list(selected_idx)
         dataset_dict["image"] = []
         dataset_dict["instances"] = []
         dataset_dict["file_names"] = []
+        dataset_dict["gt_masks_merge"] = []
+        
         for frame_idx in selected_idx:
             dataset_dict["file_names"].append(file_names[frame_idx])
 
@@ -538,11 +544,13 @@ class YTVISDatasetMapper:
                 )
             instances.gt_ids = torch.tensor(_gt_ids)
             instances = filter_empty_instances(instances)
+            
             # if instances.has("gt_masks"):
             #     instances.gt_boxes = instances.gt_masks.get_bounding_boxes()
             #     instances = filter_empty_instances(instances)
             if not instances.has("gt_masks"):
                 instances.gt_masks = BitMasks(torch.empty((0, *image_shape)))
+            dataset_dict['gt_masks_merge'].append(self._merge_masks(instances.gt_masks.tensor))
             dataset_dict["instances"].append(instances)
 
         return dataset_dict
@@ -704,6 +712,7 @@ class CocoClipDatasetMapper:
             instances.gt_ids = torch.tensor(_gt_ids)
             # instances.gt_boxes = instances.gt_masks.get_bounding_boxes()  # NOTE we don't need boxes
             instances = filter_empty_instances(instances)
+            
             h, w = instances.image_size
             if hasattr(instances, 'gt_masks'):
                 gt_masks = instances.gt_masks

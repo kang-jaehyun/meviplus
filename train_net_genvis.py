@@ -78,7 +78,7 @@ class Trainer(DefaultTrainer):
             evaluator_list.append(YTVISEvaluator(dataset_name, cfg, True, output_folder))
         elif evaluator_type == "mevis":
             evaluator_list.append(MeViSEvaluator(dataset_name, cfg, True, output_folder))
-            
+        
         if len(evaluator_list) == 0:
             raise NotImplementedError(
                 "no Evaluator for the dataset {} with the type {}".format(
@@ -100,7 +100,7 @@ class Trainer(DefaultTrainer):
                         cfg, is_train=True, is_tgt=(d_i==len(cfg.DATASETS.TRAIN)-1), src_dataset_name=dataset_name
                     )
                 )
-            elif dataset_name.startswith('ytvis') or dataset_name.startswith('ovis'):
+            elif dataset_name.startswith('refyt') or dataset_name.startswith('ovis'):
                 mappers.append(
                     YTVISDatasetMapper(cfg, is_train=True, is_tgt=(d_i==len(cfg.DATASETS.TRAIN)-1), src_dataset_name=dataset_name)
                 )
@@ -132,6 +132,8 @@ class Trainer(DefaultTrainer):
             mapper = YTVISDatasetMapper(cfg, is_train=False)
         elif dataset_name.startswith('mevis') or dataset_name.startswith('ovis'):
             mapper = MeViSDatasetMapper(cfg, is_train=False)
+        elif dataset_name.startswith('refyt') or dataset_name.startswith('ovis'):
+            mapper = YTVISDatasetMapper(cfg, is_train=False)
         return build_detection_test_loader(cfg, dataset_name, mapper=mapper)
 
     @classmethod

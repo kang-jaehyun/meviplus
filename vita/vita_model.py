@@ -316,6 +316,7 @@ class Vita(nn.Module):
             gt_classes_per_video = targets_per_video["instances"][0].gt_classes.to(self.device)
             
             for f in range(self.num_frames):
+                # if 'gt_masks_merge' in targets_per_video:
                 merged_h, merged_w = targets_per_video["gt_masks_merge"][f].shape[-2:]
                 # need to check -> merged h, merged w
                 gt_merged_masks_per_video[f, :merged_h, :merged_w] = targets_per_video['gt_masks_merge'][f]

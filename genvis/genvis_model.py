@@ -25,6 +25,7 @@ from detectron2.projects.point_rend.point_features import (
 )
 
 from typing import Optional
+from groundingdino.util.inference import load_model, load_image, predict, annotate
 
 @META_ARCH_REGISTRY.register()
 class Genvis(Vita):
@@ -34,8 +35,8 @@ class Genvis(Vita):
         self,
         len_clip_window: int,
         genvis_criterion: nn.Module,
-        text_encoder: nn.Module,
-        vis2text: nn.Module,
+        # text_encoder: nn.Module,
+        # vis2text: nn.Module,
         text_decoder: nn.Module,
         freeze_text_encoder: bool,
         **kwargs,
@@ -45,14 +46,20 @@ class Genvis(Vita):
         self.len_clip_window = len_clip_window
         self.genvis_criterion = genvis_criterion
         self.freeze_detector = kwargs["freeze_detector"]
-        self.vis2text = vis2text
-        self.text_encoder = text_encoder
+        # self.vis2text = vis2text
+        # self.text_encoder = text_encoder
         self.text_decoder = text_decoder
+        self.feature_proj = nn.ModuleList()
+        for i in range(4):
+            self.feature_proj.append(nn.Conv2d(96*(2**i), 256*(2**i), kernel_size=1, bias=False))
         
-        if freeze_text_encoder:
-            print("Freeze text encoder")
-            for p in self.text_encoder.parameters():
-                p.requires_grad_(False)
+        
+
+        self.dino = load_model("/workspace/GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py", "weights/groundingdino_swint_ogc.pth")
+
+        for p in self.dino.parameters():
+            p.requires_grad_(False)
+            
     @classmethod
     def from_config(cls, cfg):
         rets = Vita.from_config(cfg)
@@ -112,7 +119,7 @@ class Genvis(Vita):
             importance_sample_ratio=cfg.MODEL.MASK_FORMER.IMPORTANCE_SAMPLE_RATIO,
             sim_use_clip=cfg.MODEL.VITA.SIM_USE_CLIP,
         )
-        text_encoder = RobertaModel.from_pretrained('roberta-base')
+        # text_encoder = RobertaModel.from_pretrained('roberta-base')
         text_decoder = TextDecoder(
             nheads=cfg.MODEL.TEXT_DECODER.NHEADS,
             dim_feedforward=cfg.MODEL.TEXT_DECODER.DIM_FEEDFORWARD,
@@ -128,18 +135,18 @@ class Genvis(Vita):
         #     dropout=0.1,
         # )
         
-        vis2text = MLP(
-            input_dim = cfg.MODEL.MASK_FORMER.HIDDEN_DIM,
-            hidden_dim = cfg.MODEL.TEXT_DECODER.TEXT_DIM,
-            output_dim = cfg.MODEL.TEXT_DECODER.TEXT_DIM,
-            num_layers = cfg.MODEL.TEXT_DECODER.PROJ_LAYERS,
-        )
+        # vis2text = MLP(
+        #     input_dim = cfg.MODEL.MASK_FORMER.HIDDEN_DIM,
+        #     hidden_dim = cfg.MODEL.TEXT_DECODER.TEXT_DIM,
+        #     output_dim = cfg.MODEL.TEXT_DECODER.TEXT_DIM,
+        #     num_layers = cfg.MODEL.TEXT_DECODER.PROJ_LAYERS,
+        # )
 
         rets.update({
             "len_clip_window": cfg.MODEL.GENVIS.LEN_CLIP_WINDOW,
             "genvis_criterion": genvis_criterion,
-            "text_encoder": text_encoder,
-            "vis2text": vis2text,
+            # "text_encoder": text_encoder,
+            # "vis2text": vis2text,
             "text_decoder": text_decoder,
             "freeze_text_encoder": cfg.MODEL.GENVIS.FREEZE_TEXT_ENCODER,
         })
@@ -153,26 +160,40 @@ class Genvis(Vita):
                 images.append(frame.to(self.device))
         images = [(x - self.pixel_mean) / self.pixel_std for x in images]
         images = ImageList.from_tensors(images, self.size_divisibility)
+
+        texts = []
+        for video in batched_inputs:
+            sentence = video["expressions"]
+            sentence = sentence + '.' if not sentence.endswith('.') else sentence
+            texts.extend([sentence]*self.num_frames)
+            
+        # text_emb = [x['lang_tokens'].to(self.device) for x in batched_inputs]
+        # text_emb = torch.cat(text_emb, dim=0)
+
+        # text_mask = [x['lang_mask'].to(self.device) for x in batched_inputs]
+        # text_mask = torch.cat(text_mask, dim=0)
+
+        # with torch.no_grad():
+        #     text_features_all = self.text_encoder(text_emb, attention_mask=text_mask)
+        #     text_features = text_features_all.pooler_output # B, tC
+
         
-        text_emb = [x['lang_tokens'].to(self.device) for x in batched_inputs]
-        text_emb = torch.cat(text_emb, dim=0)
 
-        text_mask = [x['lang_mask'].to(self.device) for x in batched_inputs]
-        text_mask = torch.cat(text_mask, dim=0)
-
-        with torch.no_grad():
-            text_features_all = self.text_encoder(text_emb, attention_mask=text_mask)
-            text_features = text_features_all.pooler_output # B, tC
-        
-
-        features = self.backbone(images.tensor)
+        dino_outputs = self.dino(images.tensor, captions=texts)
+        # features = self.backbone(images.tensor)
+        features = {}
+        for i,r in enumerate(['res2', 'res3', 'res4', 'res5']):
+            features[r] = self.feature_proj[i](dino_outputs['backbone_features'][i].decompose()[0])
         
         BT = len(images)
         T = self.num_frames if self.training else BT 
         B = BT // T
-
-        outputs, frame_queries, mask_features = self.sem_seg_head(features)
-
+        
+        outputs, frame_queries, mask_features = self.sem_seg_head(features) # 30, 256, 96, 96
+        frame_queries = torch.stack(dino_outputs['hs'][-3:], dim=0)
+        _, _, _, C = frame_queries.shape
+        top_indices = torch.topk(frame_queries.max(-1)[0], 100, dim=2)[1]
+        frame_queries = torch.gather(frame_queries, 2, top_indices.unsqueeze(-1).repeat(1,1,1,C))
         L, BT, fQ, C = frame_queries.shape
         del features
 
@@ -212,7 +233,7 @@ class Genvis(Vita):
         output_q = self.vita_module.query_feat.weight.unsqueeze(1).repeat(1, L*B, 1) # cQ, LB, C
         cQ, LB, C = output_q.shape
         # text_q = self.text_proj(text_features)[None].repeat(1, L, 1) # 1, LB, C
-        text_q = text_features[None] # 1, 1, tC
+        # text_q = text_features[None] # 1, 1, tC
         clip_queries_list = []
         
         for c_i in range(num_clips):
@@ -254,17 +275,15 @@ class Genvis(Vita):
             prev_clip_indices = out_clip_indices
             prev_aux_clip_indices = aux_clip_indices_list
         
-        clip_queries = torch.cat(clip_queries_list, dim=1).permute(1,0,2,3) # cN, cQ, B, C
-        clip_queries_text = self.vis2text(clip_queries) # cN, cQ, B, tC
-        cN,cQ,B,tC = clip_queries_text.shape
-        refined_clip_queries_text = self.text_decoder.encode_clip_query(clip_queries_text.view(cN*cQ,B,tC)).view(cN,cQ,B,tC) # cN, cQ, B, tC
-        fused_clip_queries = F.scaled_dot_product_attention(
-            query = text_q,
-            key = refined_clip_queries_text,
-            value = clip_queries,
-        ) # cN, 1, C
+        clip_queries = torch.cat(clip_queries_list, dim=1)
+        cQ, cN, B, C = clip_queries.shape
+        clip_queries = clip_queries.reshape(cQ*cN, B, C)
+        sentence_emb = dino_outputs['encoded_sentence'].reshape(B,T,-1)
+        output, fused_sentence_emb = self.text_decoder(clip_queries, sentence_emb)
+        
         mask_features_video = torch.stack(mask_features) # cN, B, T, C, H, W
-        pred_masks_fused = torch.einsum("nqbc,nbtchw->nbthw", fused_clip_queries, mask_features_video) #  cN, B, T, H, W
+        pred_mask_embed = output["pred_mask_embed"].squeeze() # 1, B, C
+        pred_masks_fused = torch.einsum("bc,nbtchw->nbthw", pred_mask_embed, mask_features_video) #  cN, B, T, H, W
 
         fusion_loss_dict = self.genvis_criterion.loss_fusion(pred_masks_fused, video_targets_full, B)
         for k in fusion_loss_dict.keys():
@@ -363,29 +382,25 @@ class Genvis(Vita):
         return fg_indices_splits_clips
 
     def inference(self, batched_inputs):
-        mask_features = []
-        num_frames = len(batched_inputs["image"])
-        to_store = self.device
+
         """
         For best speed, use GPU as the primary storage device.
         However, when inferring long videos (e.g., OVIS), you will need a GPU of 32G or higher. 
         If you have less than 24G GPUs to infer OVIS, please uncomment the code line below.
         """
         # to_store = self.device if num_frames <= 36 else "cpu"
-
+        
+        mask_features = []
+        num_frames = len(batched_inputs["image"])
+        to_store = self.device
+        
         mask_cls, mask_embed = [], []
         pre_memory = {"k": [], "v": []}
 
-        output_q = self.vita_module.query_feat.weight.unsqueeze(1).repeat(1, 1, 1) # cQ, LB, C
+        output_q = self.vita_module.query_feat.weight.unsqueeze(1).repeat(1, 1, 1) # cQ, LB, C, note L=1 B=1
         cQ, LB, C = output_q.shape
-        text_emb = batched_inputs['lang_tokens'].to(self.device)
-        text_mask = batched_inputs['lang_mask'].to(self.device)
 
-        with torch.no_grad():
-            text_features_all = self.text_encoder(text_emb, attention_mask=text_mask)
-            text_features = text_features_all.pooler_output # B, tC
-        
-        text_q = text_features[None] # 1, B, tC
+
         pred_masks = []
         clip_queries_list = []
         mask_features_list = []
@@ -393,17 +408,31 @@ class Genvis(Vita):
             images = batched_inputs["image"][i*self.len_clip_window : (i+1)*self.len_clip_window]
             images = [(x.to(self.device) - self.pixel_mean) / self.pixel_std for x in images]
             images = ImageList.from_tensors(images, self.size_divisibility)
+            
+            texts = []
+            sentence = batched_inputs["expressions"]
+            sentence = sentence + '.' if not sentence.endswith('.') else sentence
+            texts.extend([sentence]*images.tensor.shape[0])
 
-
-
-            features = self.backbone(images.tensor)
+            dino_outputs = self.dino(images.tensor, captions=texts)
+            # features = self.backbone(images.tensor)
+            features = {}
+            for i,r in enumerate(['res2', 'res3', 'res4', 'res5']):
+                features[r] = self.feature_proj[i](dino_outputs['backbone_features'][i].decompose()[0])
+            # features = self.backbone(images.tensor)
+            
             outputs, frame_queries, _mask_features = self.sem_seg_head(features)
+            frame_queries = torch.stack(dino_outputs['hs'][-3:], dim=0) # last 3 layer from gdino
+            _, _, _, C = frame_queries.shape
+            top_indices = torch.topk(frame_queries.max(-1)[0], 100, dim=2)[1]
+            frame_queries = torch.gather(frame_queries, 2, top_indices.unsqueeze(-1).repeat(1,1,1,C))
             L, BT, fQ, C = frame_queries.shape
+            del features
             
             
             vita_outputs, output_q = self.vita_module(frame_queries, pre_memory, output_q)
             
-            clip_queries_list.append(output_q.reshape(cQ, L, LB//L, C)[:, -1:, :, :])
+            clip_queries_list.append(output_q.reshape(cQ, -1, 1, C)[:, -1:, :, :])
             
             # BT is 1 as runs per frame
             _mask_features = self.vita_module.vita_mask_features(_mask_features)
@@ -427,25 +456,20 @@ class Genvis(Vita):
         out_width  = batched_inputs.get("width", image_size[1])
 
         del outputs, images, batched_inputs
-
-        clip_queries = torch.cat(clip_queries_list, dim=1).permute(1,0,2,3) # cN, cQ, B, C
-        clip_queries_text = self.vis2text(clip_queries) # cN, cQ, B, tC
-        cN,cQ,B,tC = clip_queries_text.shape
-        refined_clip_queries_text = self.text_decoder.encode_clip_query(clip_queries_text.view(cN*cQ,B,tC)).view(cN,cQ,B,tC) # cN, cQ, B, tC
-        fused_clip_queries = F.scaled_dot_product_attention(
-            query = text_q,
-            key = refined_clip_queries_text,
-            value = clip_queries,
-        ) # cN, 1, C
         
-        pred_masks_fused = []
-        for i, mf in enumerate(mask_features_list):
-            # if pred_masks_fused is None:
-            #     pred_masks_fused = torch.einsum("qbc,tbchw->bthw", fused_clip_queries[i], mf)
-            # else:
-            clip_pred_masks_fused = torch.einsum("qbc,tbchw->bthw", fused_clip_queries[i], mf)
-            pred_masks_fused.append(clip_pred_masks_fused)        
-        pred_masks_fused = torch.cat(pred_masks_fused, dim=1)
+        mask_features_video = torch.cat(mask_features_list, dim=0) # T, B, C, H, W
+        T, B, C, H, W = mask_features_video.shape
+        
+        clip_queries = torch.cat(clip_queries_list, dim=1)
+        cQ, cN, B, C = clip_queries.shape
+        clip_queries = clip_queries.reshape(cQ*cN, B, C)
+        sentence_emb = dino_outputs['encoded_sentence'][0][None, None].repeat(1,T,1)
+        output, fused_sentence_emb = self.text_decoder(clip_queries, sentence_emb)
+        
+
+        pred_mask_embed = output["pred_mask_embed"][0] # B, C = 1, C
+        pred_masks_fused = torch.einsum("bc,tbchw->bthw", pred_mask_embed, mask_features_video) #  B, T, H, W
+        pred_masks_fused = pred_masks_fused.reshape(1, T, H, W) # B = 1
 
         # cN,B,T,H,W = pred_masks_fused.shape
         # mask_cls   = torch.cat(mask_cls)   # NUM_CLIP, cQ, K+1
@@ -543,11 +567,11 @@ class TextDecoder(nn.Module):
         self.enc_layers = enc_layers
         self.num_layers = dec_layers
         # self.transformer_self_attention_layers = nn.ModuleList()
-        # self.transformer_cross_attention_layers = nn.ModuleList()
-        # self.transformer_ffn_layers = nn.ModuleList()
-        # self.decoder_norm = nn.LayerNorm(hidden_dim)
-        # self.src_embed = nn.Identity()
-        # self.mask_embed = MLP(hidden_dim, hidden_dim, mask_dim, 3)
+        self.transformer_cross_attention_layers = nn.ModuleList()
+        self.transformer_ffn_layers = nn.ModuleList()
+        self.decoder_norm = nn.LayerNorm(hidden_dim)
+        self.src_embed = nn.Identity()
+        self.mask_embed = MLP(hidden_dim, hidden_dim, mask_dim, 3)
         self.num_frames = num_frames
         
         pre_norm = False
@@ -572,33 +596,33 @@ class TextDecoder(nn.Module):
                     )
                 )
                 
-        # for _ in range(self.num_layers):
-        #     # self.transformer_self_attention_layers.append(
-        #     #     SelfAttentionLayer(
-        #     #         d_model=hidden_dim,
-        #     #         nhead=nheads,
-        #     #         dropout=0.0,
-        #     #         normalize_before=pre_norm,
-        #     #     )
-        #     # )
+        for _ in range(self.num_layers):
+            # self.transformer_self_attention_layers.append(
+            #     SelfAttentionLayer(
+            #         d_model=hidden_dim,
+            #         nhead=nheads,
+            #         dropout=0.0,
+            #         normalize_before=pre_norm,
+            #     )
+            # )
 
-        #     self.transformer_cross_attention_layers.append(
-        #         CrossAttentionLayer(
-        #             d_model=hidden_dim,
-        #             nhead=nheads,
-        #             dropout=0.0,
-        #             normalize_before=pre_norm,
-        #         )
-        #     )
+            self.transformer_cross_attention_layers.append(
+                CrossAttentionLayer(
+                    d_model=hidden_dim,
+                    nhead=nheads,
+                    dropout=0.0,
+                    normalize_before=pre_norm,
+                )
+            )
 
-        #     self.transformer_ffn_layers.append(
-        #         FFNLayer(
-        #             d_model=hidden_dim,
-        #             dim_feedforward=dim_feedforward,
-        #             dropout=0.0,
-        #             normalize_before=pre_norm,
-        #         )
-        #     )
+            self.transformer_ffn_layers.append(
+                FFNLayer(
+                    d_model=hidden_dim,
+                    dim_feedforward=dim_feedforward,
+                    dropout=0.0,
+                    normalize_before=pre_norm,
+                )
+            )
     def encode_clip_query(self, clip_q):
         """
         input shape (frame_query)   : cQ, LB, tC
@@ -617,40 +641,56 @@ class TextDecoder(nn.Module):
         # clip_q = frame_query.view(return_shape)
         return clip_q
         
-    # def forward(self, clip_q, output):
-    #     # clip_q : cQ, LB, tC
-    #     # output : 1, LB, tC 
-    #     if not self.training:
-    #         clip_q = clip_q[[-1]]
+    def forward(self, clip_q, text_q):
+        # clip_q : cQcN, B, C
+        # text_q : B, T, C 
+        # if not self.training:
+            # clip_q = clip_q[[-1]]
         
-    #     cQ, LB, tC = clip_q.shape
-    #     _, LB, tC = output.shape
-    #     # L = LB // B
-    #     clip_q = self.encode_clip_query(clip_q) # cQ, LB, tC
-    #     src = self.src_embed(clip_q) # cQ, LB, tC
+        cN, cQB, C = clip_q.shape
+        B, T, C = text_q.shape
+        cQ = cQB // B
         
-    #     # decoder_outputs = []
-    #     for i in range(self.num_layers):
-    #         # attention: cross-attention first
-    #         output = self.transformer_cross_attention_layers[i](
-    #             output, src,
-    #             memory_mask=None,
-    #             memory_key_padding_mask=None,
-    #             pos=None, query_pos=None
-    #         )
+        clip_q = self.encode_clip_query(clip_q) # cQcN, B, C
+        src = self.src_embed(clip_q) # cQcN, B, C
+        output = text_q[:,-1,:].reshape(1, B, C) # 1, B, C
+        # decoder_outputs = []
+        for i in range(self.num_layers):
+            # attention: cross-attention first
+            output = self.transformer_cross_attention_layers[i](
+                output, src,
+                memory_mask=None,
+                memory_key_padding_mask=None,
+                pos=None, query_pos=None
+            )
 
-    #         # FFN
-    #         output = self.transformer_ffn_layers[i](
-    #             output
-    #         )
-    #         output = self.decoder_norm(output)
+            # FFN
+            output = self.transformer_ffn_layers[i](
+                output
+            )
+            output = self.decoder_norm(output)
             
-    #     pred_mask_embed = self.mask_embed(output)
+        pred_mask_embed = self.mask_embed(output)
         
-    #     out = {
-    #         'pred_mask_embed' : pred_mask_embed
-    #     }
+        out = {
+            'pred_mask_embed' : pred_mask_embed
+        }
         
         
-    #     return out, output
+        return out, output
+class GroundingDinoWrapper(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.model = load_model("/workspace/GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py", "weights/groundingdino_swint_ogc.pth")
+        self._features = {}
+        # layer = dict([*self.model.named_modules()])[layer_id]
+        # layer.register_forward_hook(self.save_outputs_hook)
+    def save_outputs_hook(self, layer_id):
+        def fn(_, __, output):
+            self._features[layer_id] = output
+        return fn
     
+    def forward(self, images, texts):
+        full_output = self.model(images, captions=texts)
+        self._features['full_output'] = full_output
+        return self._features

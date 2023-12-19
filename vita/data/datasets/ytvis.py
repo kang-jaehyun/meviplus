@@ -147,7 +147,8 @@ def _get_ytvis_2021_instances_meta():
     return ret
 
 
-def load_ytvis_json(json_file, image_root, dataset_name=None, extra_annotation_keys=None):
+def load_ytvis_json(json_file, image_root, dataset_name=None, extra_annotation_keys=None, \
+    has_mask=True, has_expression=False, sot=False):
     from .ytvis_api.ytvos import YTVOS
 
     timer = Timer()
@@ -221,9 +222,18 @@ Category ids in annotations are not in [1, #categories]! We'll apply a mapping f
         record["height"] = vid_dict["height"]
         record["width"] = vid_dict["width"]
         record["length"] = vid_dict["length"]
-        if "eval_idx" in vid_dict:
-            record["eval_idx"] = vid_dict["eval_idx"]
         video_id = record["video_id"] = vid_dict["id"]
+        if has_expression:
+            # record["expressions"] = vid_dict["expressions"]
+            expressions_list = vid_dict["expressions"]
+            # for ref-youtube-vos and ref-davis evaluation
+            if "exp_id" in vid_dict:
+                record["exp_id"] = vid_dict["exp_id"]
+            if "video" in vid_dict:
+                record["video"] = vid_dict["video"]
+        # for UAV123
+        if "video" in vid_dict:
+            record["video"] = vid_dict["video"]
 
         video_objs = []
         for frame_idx in range(record["length"]):
@@ -235,34 +245,46 @@ Category ids in annotations are not in [1, #categories]! We'll apply a mapping f
 
                 _bboxes = anno.get("bboxes", None)
                 _segm = anno.get("segmentations", None)
-
-                if not (_bboxes and _segm and _bboxes[frame_idx] and _segm[frame_idx]):
-                    continue
-
+                if has_mask:
+                    if not (_bboxes and _segm and _bboxes[frame_idx] and _segm[frame_idx]):
+                        continue
+                else:
+                    if not (_bboxes and _bboxes[frame_idx]):
+                        continue
+                if "ori_id" in anno:
+                    # for VOS inference
+                    obj["ori_id"] = anno["ori_id"]
                 bbox = _bboxes[frame_idx]
-                segm = _segm[frame_idx]
-
                 obj["bbox"] = bbox
                 obj["bbox_mode"] = BoxMode.XYWH_ABS
-
-                if isinstance(segm, dict):
-                    if isinstance(segm["counts"], list):
-                        # convert to compressed RLE
-                        segm = mask_util.frPyObjects(segm, *segm["size"])
-                elif segm:
-                    # filter out invalid polygons (< 3 points)
-                    segm = [poly for poly in segm if len(poly) % 2 == 0 and len(poly) >= 6]
-                    if len(segm) == 0:
-                        num_instances_without_valid_segmentation += 1
-                        continue  # ignore this instance
-                obj["segmentation"] = segm
+                
+                if has_mask:
+                    segm = _segm[frame_idx]
+                    if isinstance(segm, dict):
+                        if isinstance(segm["counts"], list):
+                            # convert to compressed RLE
+                            segm = mask_util.frPyObjects(segm, *segm["size"])
+                    elif segm:
+                        # filter out invalid polygons (< 3 points)
+                        segm = [poly for poly in segm if len(poly) % 2 == 0 and len(poly) >= 6]
+                        if len(segm) == 0:
+                            num_instances_without_valid_segmentation += 1
+                            continue  # ignore this instance
+                    obj["segmentation"] = segm
 
                 if id_map:
                     obj["category_id"] = id_map[obj["category_id"]]
                 frame_objs.append(obj)
             video_objs.append(frame_objs)
         record["annotations"] = video_objs
-        dataset_dicts.append(record)
+        record["has_mask"] = has_mask
+        # language-guided detection
+
+        record["task"] = "grounding"
+        record["dataset_name"] = dataset_name
+        for exp in expressions_list:
+            record["expressions"] = exp
+            dataset_dicts.append(record)
 
     if num_instances_without_valid_segmentation > 0:
         logger.warning(
@@ -275,7 +297,7 @@ Category ids in annotations are not in [1, #categories]! We'll apply a mapping f
     return dataset_dicts
 
 
-def register_ytvis_instances(name, metadata, json_file, image_root):
+def register_ytvis_instances(name, metadata, json_file, image_root, has_mask=True, has_expression=False, sot=False):
     """
     Register a dataset in YTVIS's json annotation format for
     instance tracking.
@@ -291,52 +313,11 @@ def register_ytvis_instances(name, metadata, json_file, image_root):
     assert isinstance(json_file, (str, os.PathLike)), json_file
     assert isinstance(image_root, (str, os.PathLike)), image_root
     # 1. register a function which returns dicts
-    DatasetCatalog.register(name, lambda: load_ytvis_json(json_file, image_root, name))
+    DatasetCatalog.register(name, lambda: load_ytvis_json(json_file, image_root, name, \
+        has_mask=has_mask, has_expression=has_expression, sot=sot))
 
     # 2. Optionally, add metadata about this dataset,
     # since they might be useful in evaluation, visualization or logging
     MetadataCatalog.get(name).set(
-        json_file=json_file, image_root=image_root, evaluator_type="ytvis", **metadata
+        json_file=json_file, image_root=image_root, evaluator_type="mevis", **metadata
     )
-
-
-if __name__ == "__main__":
-    """
-    Test the YTVIS json dataset loader.
-    """
-    from detectron2.utils.logger import setup_logger
-    from detectron2.utils.visualizer import Visualizer
-    import detectron2.data.datasets  # noqa # add pre-defined metadata
-    import sys
-    from PIL import Image
-
-    logger = setup_logger(name=__name__)
-    #assert sys.argv[3] in DatasetCatalog.list()
-    meta = MetadataCatalog.get("ytvis_2019_train")
-
-    json_file = "./datasets/ytvis/instances_train_sub.json"
-    image_root = "./datasets/ytvis/train/JPEGImages"
-    dicts = load_ytvis_json(json_file, image_root, dataset_name="ytvis_2019_train")
-    logger.info("Done loading {} samples.".format(len(dicts)))
-
-    dirname = "ytvis-data-vis"
-    os.makedirs(dirname, exist_ok=True)
-
-    def extract_frame_dic(dic, frame_idx):
-        import copy
-        frame_dic = copy.deepcopy(dic)
-        annos = frame_dic.get("annotations", None)
-        if annos:
-            frame_dic["annotations"] = annos[frame_idx]
-
-        return frame_dic
-
-    for d in dicts:
-        vid_name = d["file_names"][0].split('/')[-2]
-        os.makedirs(os.path.join(dirname, vid_name), exist_ok=True)
-        for idx, file_name in enumerate(d["file_names"]):
-            img = np.array(Image.open(file_name))
-            visualizer = Visualizer(img, metadata=meta)
-            vis = visualizer.draw_dataset_dict(extract_frame_dic(d, idx))
-            fpath = os.path.join(dirname, vid_name, file_name.split('/')[-1])
-            vis.save(fpath)
