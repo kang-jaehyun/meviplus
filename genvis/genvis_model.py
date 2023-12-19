@@ -188,13 +188,18 @@ class Genvis(Vita):
         BT = len(images)
         T = self.num_frames if self.training else BT 
         B = BT // T
-        
-        outputs, frame_queries, mask_features = self.sem_seg_head(features) # 30, 256, 96, 96
         frame_queries = torch.stack(dino_outputs['hs'][-3:], dim=0)
+        encoded_sentence = dino_outputs['encoded_sentence']
+        
+        del dino_outputs
+        
+        outputs, _, mask_features = self.sem_seg_head(features) # 30, 256, 96, 96
+        
         _, _, _, C = frame_queries.shape
         top_indices = torch.topk(frame_queries.max(-1)[0], 100, dim=2)[1]
         frame_queries = torch.gather(frame_queries, 2, top_indices.unsqueeze(-1).repeat(1,1,1,C))
         L, BT, fQ, C = frame_queries.shape
+        
         del features
 
         mask_features = self.vita_module.vita_mask_features(mask_features)
@@ -278,7 +283,7 @@ class Genvis(Vita):
         clip_queries = torch.cat(clip_queries_list, dim=1)
         cQ, cN, B, C = clip_queries.shape
         clip_queries = clip_queries.reshape(cQ*cN, B, C)
-        sentence_emb = dino_outputs['encoded_sentence'].reshape(B,T,-1)
+        sentence_emb = encoded_sentence.reshape(B,T,-1)
         output, fused_sentence_emb = self.text_decoder(clip_queries, sentence_emb)
         
         mask_features_video = torch.stack(mask_features) # cN, B, T, C, H, W
@@ -421,8 +426,10 @@ class Genvis(Vita):
                 features[r] = self.feature_proj[i](dino_outputs['backbone_features'][i].decompose()[0])
             # features = self.backbone(images.tensor)
             
-            outputs, frame_queries, _mask_features = self.sem_seg_head(features)
+            encoded_sentence = dino_outputs['encoded_sentence']
             frame_queries = torch.stack(dino_outputs['hs'][-3:], dim=0) # last 3 layer from gdino
+            
+            outputs, _, _mask_features = self.sem_seg_head(features)
             _, _, _, C = frame_queries.shape
             top_indices = torch.topk(frame_queries.max(-1)[0], 100, dim=2)[1]
             frame_queries = torch.gather(frame_queries, 2, top_indices.unsqueeze(-1).repeat(1,1,1,C))
