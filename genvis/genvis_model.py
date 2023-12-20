@@ -55,7 +55,7 @@ class Genvis(Vita):
         
         
 
-        self.dino = load_model("/workspace/GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py", "weights/groundingdino_swint_ogc.pth")
+        self.dino = load_model("/workspace/GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py", "/workspace/GroundingDINO/weights/groundingdino_swint_ogc.pth")
 
         for p in self.dino.parameters():
             p.requires_grad_(False)
