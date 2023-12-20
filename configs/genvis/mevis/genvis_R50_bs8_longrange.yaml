@@ -1,7 +1,7 @@
 _BASE_: ../../vita/mevis/vita_R50_bs8.yaml
 MODEL:
   META_ARCHITECTURE: "Genvis"
-  WEIGHTS: "checkpoints/vita_r50_ovis.pth"
+  # WEIGHTS: "checkpoints/vita_r50_ovis.pth"
   VITA:
     ENC_WINDOW_SIZE: 0
     FREEZE_DETECTOR: True
@@ -12,7 +12,7 @@ DATASETS:
   TRAIN: ("mevis_train",)
   TEST: ("mevis_val",)
 SOLVER:
-  IMS_PER_BATCH: 8
+  IMS_PER_BATCH: 4
   STEPS: (50000,)
   MAX_ITER: 70000
   CHECKPOINT_PERIOD: 5000

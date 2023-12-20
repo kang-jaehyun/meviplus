@@ -287,7 +287,7 @@ class Genvis(Vita):
         output, fused_sentence_emb = self.text_decoder(clip_queries, sentence_emb)
         
         mask_features_video = torch.stack(mask_features) # cN, B, T, C, H, W
-        pred_mask_embed = output["pred_mask_embed"].squeeze() # 1, B, C
+        pred_mask_embed = output["pred_mask_embed"].reshape(B,C) # 1, B, C
         pred_masks_fused = torch.einsum("bc,nbtchw->nbthw", pred_mask_embed, mask_features_video) #  cN, B, T, H, W
 
         fusion_loss_dict = self.genvis_criterion.loss_fusion(pred_masks_fused, video_targets_full, B)
