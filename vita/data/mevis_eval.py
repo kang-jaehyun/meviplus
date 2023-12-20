@@ -21,6 +21,7 @@ from torch.nn import functional as F
 from detectron2.utils.memory import retry_if_cuda_oom
 import math
 from skimage.morphology import disk
+import cv2
 
 class MeViSEvaluator(DatasetEvaluator):
     """
@@ -108,24 +109,33 @@ class MeViSEvaluator(DatasetEvaluator):
         # prediction = instances_to_coco_json_video(inputs, outputs)
         # self._predictions.extend(prediction)
         pred_masks = outputs["pred_masks"] # 1, T, H, W
-        target_masks = torch.cat(inputs[0]['gt_masks_merge'])[None].to(pred_masks) # 1, T, H, W
         _, T, H, W = pred_masks.shape
-        
-        target_masks = retry_if_cuda_oom(F.interpolate)(
-            target_masks.to(dtype=torch.float16),
-            size=(H,W),
-            mode="nearest",
-        ) # 1, T, H, W
-        
-        # reduce batch
-        target_masks = target_masks.squeeze(0) 
         pred_masks = pred_masks.squeeze(0)
         
-        j = self.db_eval_iou(target_masks, pred_masks)
-        f = self.db_eval_boundary(target_masks, pred_masks)
-        
-        self._Js.append(j.mean().cpu())
-        self._Fs.append(f.mean())
+        if inputs[0]['split'] == 'test':
+            video_id = inputs[0]['video_name']
+            exp_id = inputs[0]['exp_id']
+            video_path = os.path.join(self._output_dir, video_id, exp_id)
+            os.makedirs(video_path, exist_ok=True)
+            for i, m in enumerate(pred_masks.cpu().numpy().astype(np.float32)):
+                cv2.imwrite(os.path.join(video_path, f'{str(i).zfill(5)}.png'), m * 255)
+            
+        else:
+            target_masks = torch.cat(inputs[0]['gt_masks_merge'])[None].to(pred_masks) # 1, T, H, W
+            target_masks = retry_if_cuda_oom(F.interpolate)(
+                target_masks.to(dtype=torch.float16),
+                size=(H,W),
+                mode="nearest",
+            ) # 1, T, H, W
+            
+            # reduce batch
+            target_masks = target_masks.squeeze(0) 
+            
+            j = self.db_eval_iou(target_masks, pred_masks)
+            f = self.db_eval_boundary(target_masks, pred_masks)
+            
+            self._Js.append(j.mean().cpu())
+            self._Fs.append(f.mean())
         
         
 

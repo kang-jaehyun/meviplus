@@ -39,7 +39,7 @@ class VisualizationDemo(object):
             self.predictor = VideoPredictor(cfg)
         self.conf_thres = conf_thres
 
-    def run_on_video(self, frames):
+    def run_on_video(self, frames, expressions):
         """
         Args:
             frames (List[np.ndarray]): a list of images of shape (H, W, C) (in BGR order).
@@ -49,19 +49,19 @@ class VisualizationDemo(object):
             vis_output (VisImage): the visualized image output.
         """
         vis_output = None
-        predictions = self.predictor(frames)
+        predictions = self.predictor(frames, expressions)
 
         image_size = predictions["image_size"]
-        _pred_scores = predictions["pred_scores"]
-        _pred_labels = predictions["pred_labels"]
-        _pred_masks = predictions["pred_masks"]
+        # _pred_scores = predictions["pred_scores"]
+        # _pred_labels = predictions["pred_labels"]
+        pred_masks = predictions["pred_masks"]
 
-        pred_scores, pred_labels, pred_masks = [], [], []
-        for s, l, m in zip(_pred_scores, _pred_labels, _pred_masks):
-            if s > self.conf_thres:
-                pred_scores.append(s)
-                pred_labels.append(l)
-                pred_masks.append(m)
+        # pred_scores, pred_labels, pred_masks = [], [], []
+        # for s, l, m in zip(_pred_scores, _pred_labels, _pred_masks):
+            # if s > self.conf_thres:
+                # pred_scores.append(s)
+                # pred_labels.append(l)
+                # pred_masks.append(m)
 
         frame_masks = list(zip(*pred_masks))
         total_vis_output = []
@@ -69,10 +69,10 @@ class VisualizationDemo(object):
             frame = frames[frame_idx][:, :, ::-1]
             visualizer = TrackVisualizer(frame, self.metadata, instance_mode=self.instance_mode)
             ins = Instances(image_size)
-            if len(pred_scores) > 0:
-                ins.scores = pred_scores
-                ins.pred_classes = pred_labels
-                ins.pred_masks = torch.stack(frame_masks[frame_idx], dim=0)
+            # if len(pred_scores) > 0:
+                # ins.scores = pred_scores
+                # ins.pred_classes = pred_labels
+            ins.pred_masks = torch.stack(frame_masks[frame_idx], dim=0)
 
             vis_output = visualizer.draw_instance_predictions(predictions=ins)
             total_vis_output.append(vis_output)
@@ -100,7 +100,7 @@ class VideoPredictor(DefaultPredictor):
         inputs = cv2.imread("input.jpg")
         outputs = pred(inputs)
     """
-    def __call__(self, frames):
+    def __call__(self, frames, expressions):
         """
         Args:
             original_image (np.ndarray): an image of shape (H, W, C) (in BGR order).
@@ -121,7 +121,7 @@ class VideoPredictor(DefaultPredictor):
                 image = torch.as_tensor(image.astype("float32").transpose(2, 0, 1))
                 input_frames.append(image)
 
-            inputs = {"image": input_frames, "height": height, "width": width}
+            inputs = {"image": input_frames, "height": height, "width": width, "expressions": expressions}
             predictions = self.model([inputs])
             return predictions
 

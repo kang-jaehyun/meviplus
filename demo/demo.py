@@ -63,7 +63,11 @@ def get_parser():
         help="A file or directory to save output visualizations. "
         "If not given, will show output in an OpenCV window.",
     )
-
+    parser.add_argument(
+        "--exp",
+        nargs="+",
+        help="expressions",
+    )
     parser.add_argument(
         "--save-frames",
         default=False,
@@ -112,7 +116,8 @@ if __name__ == "__main__":
     cfg = setup_cfg(args)
 
     demo = VisualizationDemo(cfg, conf_thres=args.confidence_threshold)
-
+    exp = ' '.join(args.exp)
+    
     if args.output:
         os.makedirs(args.output, exist_ok=True)
 
@@ -128,10 +133,10 @@ if __name__ == "__main__":
 
         start_time = time.time()
         with autocast():
-            predictions, visualized_output = demo.run_on_video(vid_frames)
+            predictions, visualized_output = demo.run_on_video(vid_frames, exp)
         logger.info(
             "detected {} instances per frame in {:.2f}s".format(
-                len(predictions["pred_scores"]), time.time() - start_time
+                len(predictions["pred_masks"]), time.time() - start_time
             )
         )
 

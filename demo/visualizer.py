@@ -59,12 +59,13 @@ class TrackVisualizer(Visualizer):
         else:
             masks = None
 
-        if classes is None:
-            return self.output
+        # if classes is None:
+        #     return self.output
 
-        colors = [
-            self._jitter([x / 255 for x in self.metadata.thing_colors[c]], id) for id, c in enumerate(classes)
-        ]
+        # colors = [
+        #     self._jitter([x / 255 for x in self.metadata.thing_colors[c]], id) for id, c in enumerate(classes)
+        # ]
+        colors = [[1.0,0.0,0.0]]
         alpha = 0.5
 
         if self._instance_mode == ColorMode.IMAGE_BW:

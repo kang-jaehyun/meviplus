@@ -57,6 +57,7 @@ def load_mevis_json(image_root, json_file):
                 meta['exp_id'] = exp_id
                 meta['category'] = 0
                 meta['length'] = vid_len
+                meta['split'] = 'train'
                 metas.append(meta)
     elif image_root.split('/')[-1] == 'test':
         for vid in videos:
@@ -73,6 +74,7 @@ def load_mevis_json(image_root, json_file):
                 meta['exp_id'] = exp_id
                 meta['category'] = 0
                 meta['length'] = vid_len
+                meta['split'] = 'test'
                 metas.append(meta)
     else: # valid or valid_single
         mask_json = os.path.join(image_root, 'mask_dict.json')
@@ -96,6 +98,7 @@ def load_mevis_json(image_root, json_file):
                 meta['exp_id'] = exp_id
                 meta['category'] = 0
                 meta['length'] = vid_len
+                meta['split'] = 'valid'
                 metas.append(meta)
 
     dataset_dicts = []
@@ -103,8 +106,8 @@ def load_mevis_json(image_root, json_file):
         record = {}
         record["file_names"] = [os.path.join(image_root, 'JPEGImages', vid_dict['video'], vid_dict["frames"][i]+ '.jpg') for i in range(vid_dict["length"])]
         record["length"] = vid_dict["length"]
-        video_name, exp, anno_ids, obj_ids, category, exp_id = \
-            vid_dict['video'], vid_dict['exp'], vid_dict['anno_id'], vid_dict['obj_id'], vid_dict['category'],  vid_dict['exp_id']
+        video_name, exp, anno_ids, obj_ids, category, exp_id, split = \
+            vid_dict['video'], vid_dict['exp'], vid_dict['anno_id'], vid_dict['obj_id'], vid_dict['category'],  vid_dict['exp_id'], vid_dict['split']
 
         exp = " ".join(exp.lower().split())
         if "eval_idx" in vid_dict:
@@ -129,6 +132,7 @@ def load_mevis_json(image_root, json_file):
                     obj["bbox_mode"] = BoxMode.XYXY_ABS
                     frame_objs.append(obj)
                 video_objs.append(frame_objs)
+        record["split"] = split
         record["annotations"] = video_objs
         record["expressions"] = exp
         record["exp_id"] = exp_id

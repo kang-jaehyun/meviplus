@@ -223,7 +223,7 @@ class MeViSDatasetMapper:
         """
         # TODO consider examining below deepcopy as it costs huge amount of computations.
         dataset_dict = copy.deepcopy(dataset_dict)  # it will be modified by code below
-
+        split = dataset_dict['split']
         video_length = dataset_dict["length"]
         if self.is_train:
             ref_frame = random.randrange(video_length)
@@ -246,7 +246,8 @@ class MeViSDatasetMapper:
         file_names = dataset_dict.pop("file_names", None)
 
         # if self.is_train:
-        if video_annos is not None:
+        # if video_annos is not None:
+        if split in ('train', 'valid'):
             _ids = set()
             for frame_idx in selected_idx:
                 _ids.update([anno["id"] for anno in video_annos[frame_idx]])
@@ -280,9 +281,11 @@ class MeViSDatasetMapper:
             dataset_dict["image"].append(torch.as_tensor(np.ascontiguousarray(image.transpose(2, 0, 1))))
 
             # if (video_annos is None) or (not self.is_train):
-            if video_annos is None:
+            # if video_annos is None:
+            #     continue
+            if split == 'test':
                 continue
-
+            
             # NOTE copy() is to prevent annotations getting changed from applying augmentations
             _frame_annos = []
             for anno in video_annos[frame_idx]:
