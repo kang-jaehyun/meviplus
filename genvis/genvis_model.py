@@ -283,7 +283,7 @@ class Genvis(Vita):
             
             for out in vita_outputs["aux_outputs"]:
                 out["pred_masks"] = torch.einsum("lbqc,btchw->lbqthw", out["pred_mask_embed"], mask_features_per_clip)
-                
+
             genvis_loss_dict, out_clip_indices, aux_clip_indices_list = self.genvis_criterion(
                                                                             outputs=vita_outputs, 
                                                                             clip_targets=clip_targets, 
@@ -316,11 +316,15 @@ class Genvis(Vita):
             prev_clip_indices = out_clip_indices
             prev_aux_clip_indices = aux_clip_indices_list
         
-        all_clip_queries = self.q2t(torch.stack(clip_queries)) # cN, cQ, B, tC
+        # all_clip_queries = self.q2t(torch.stack(clip_queries)) # cN, cQ, B, tC
+        last_clip_query = self.q2t(output_q[:,-B:,:]) # cQ, B, tC
         text_q = self.t2t(encoded_sentence) # B, tC
         
-        sim = torch.einsum("nqbc,bc->bnq", all_clip_queries, text_q)
-        sim = sim.max(dim=1)[0]
+        # sim = torch.einsum("nqbc,bc->bnq", all_clip_queries, text_q)
+        # sim = torch.einsum("qbc,bc->bq", last_clip_query, text_q)
+        # sim = sim.max(dim=1)[0]
+        
+        sim = F.cosine_similarity(last_clip_query, text_q[None], dim=-1).permute(1,0) # B, cQ
         dummy = torch.zeros_like(sim)
         for i, ind_set in enumerate(positive_indices):
             dummy[i][list(ind_set)] = 1
@@ -524,12 +528,17 @@ class Genvis(Vita):
 
         del outputs, images, batched_inputs
         
-        stacked_queries = torch.stack(clip_queries) # nC, cQ, B(1), C
-        all_clip_queries = self.q2t(stacked_queries) # nC, cQ, B(1), tC
-        text_q = self.t2t(encoded_sentence) # B, tC
         
-        sim = torch.einsum("nqbc,bc->bnq", all_clip_queries, text_q)
-        sim = sim.max(dim=1)[0]
+        last_clip_query = self.q2t(output_q[:,-1:,:]) # cQ, B, tC
+        text_q = self.t2t(encoded_sentence) # B, tC
+        sim = F.cosine_similarity(last_clip_query, text_q[None], dim=-1).permute(1,0) # B, cQ
+        
+        stacked_queries = torch.stack(clip_queries) # nC, cQ, B(1), C
+        # all_clip_queries = self.q2t(stacked_queries) # nC, cQ, B(1), tC
+        # text_q = self.t2t(encoded_sentence) # B, tC
+        
+        # sim = torch.einsum("nqbc,bc->bnq", all_clip_queries, text_q)
+        # sim = sim.max(dim=1)[0]
         
         where = sim > 0.
         indices = where.nonzero(as_tuple=False)[:,1]
