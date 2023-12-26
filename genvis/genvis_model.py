@@ -93,7 +93,7 @@ class Genvis(Vita):
             genvis_weight_dict["loss_genvis_sim"] = sim_weight
 
         if cfg.MODEL.VITA.DEEP_SUPERVISION:
-            aux_weight_dict = {}
+            aux_weight_dict = {}             
             for i in range(cfg.MODEL.VITA.DEC_LAYERS - 1):
                 aux_weight_dict.update({k + f"_{i}": v for k, v in genvis_weight_dict.items()})
             genvis_weight_dict.update(aux_weight_dict)
@@ -236,6 +236,8 @@ class Genvis(Vita):
         prev_clip_indices = None
         prev_aux_clip_indices = None
         output_q = self.vita_module.query_feat.weight.unsqueeze(1).repeat(1, L*B, 1) # cQ, LB, C
+        encoded_sentence = encoded_sentence.reshape(1, B, T, -1).permute(0,2,1,3)[:,0,:,:] # 1, B, C
+        
         cQ, LB, C = output_q.shape
         # text_q = self.text_proj(text_features)[None].repeat(1, L, 1) # 1, LB, C
         # text_q = text_features[None] # 1, 1, tC
@@ -247,7 +249,8 @@ class Genvis(Vita):
             frame_queries_per_clip = frame_queries[c_i]
             mask_features_per_clip = mask_features[c_i]
             fg_indices_per_clip = fg_indices[c_i]
-
+            
+            output_q = output_q + encoded_sentence.repeat(1, L, 1)
             vita_outputs, output_q = self.vita_module(frame_queries_per_clip.flatten(1,2), pre_memory, output_q)
             clip_queries_list.append(output_q.reshape(cQ, L, B, C)[:, -1:, :, :])
             vita_outputs["pred_masks"] = torch.einsum("lbqc,btchw->lbqthw", vita_outputs["pred_mask_embed"], mask_features_per_clip)
@@ -283,7 +286,7 @@ class Genvis(Vita):
         clip_queries = torch.cat(clip_queries_list, dim=1)
         cQ, cN, B, C = clip_queries.shape
         clip_queries = clip_queries.reshape(cQ*cN, B, C)
-        sentence_emb = encoded_sentence.reshape(B,T,-1)
+        sentence_emb = encoded_sentence.reshape(1,B,-1)
         output, fused_sentence_emb = self.text_decoder(clip_queries, sentence_emb)
         
         mask_features_video = torch.stack(mask_features) # cN, B, T, C, H, W
@@ -655,12 +658,12 @@ class TextDecoder(nn.Module):
             # clip_q = clip_q[[-1]]
         
         cN, cQB, C = clip_q.shape
-        B, T, C = text_q.shape
+        _, B, C = text_q.shape
         cQ = cQB // B
         
         clip_q = self.encode_clip_query(clip_q) # cQcN, B, C
         src = self.src_embed(clip_q) # cQcN, B, C
-        output = text_q[:,-1,:].reshape(1, B, C) # 1, B, C
+        output = text_q.reshape(1, B, C) # 1, B, C
         # decoder_outputs = []
         for i in range(self.num_layers):
             # attention: cross-attention first
