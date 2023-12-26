@@ -26,6 +26,7 @@ from detectron2.projects.point_rend.point_features import (
 
 from typing import Optional
 from groundingdino.util.inference import load_model, load_image, predict, annotate
+import gc
 
 @META_ARCH_REGISTRY.register()
 class Genvis(Vita):
@@ -192,6 +193,9 @@ class Genvis(Vita):
         encoded_sentence = dino_outputs['encoded_sentence']
         
         del dino_outputs
+        
+        gc.collect()
+        torch.cuda.empty_cache()
         
         outputs, _, mask_features = self.sem_seg_head(features) # 30, 256, 96, 96
         
@@ -467,6 +471,9 @@ class Genvis(Vita):
 
         del outputs, images, batched_inputs
         
+        gc.collect()
+        torch.cuda.empty_cache()
+        
         mask_features_video = torch.cat(mask_features_list, dim=0) # T, B, C, H, W
         T, B, C, H, W = mask_features_video.shape
         
@@ -476,7 +483,10 @@ class Genvis(Vita):
         sentence_emb = dino_outputs['encoded_sentence'][0][None, None].repeat(1,T,1)
         output, fused_sentence_emb = self.text_decoder(clip_queries, sentence_emb)
         
-
+        del clip_queries, mask_features_list
+        gc.collect()
+        torch.cuda.empty_cache()
+        
         pred_mask_embed = output["pred_mask_embed"][0] # B, C = 1, C
         pred_masks_fused = torch.einsum("bc,tbchw->bthw", pred_mask_embed, mask_features_video) #  B, T, H, W
         pred_masks_fused = pred_masks_fused.reshape(1, T, H, W) # B = 1
