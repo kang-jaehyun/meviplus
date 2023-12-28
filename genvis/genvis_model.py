@@ -543,8 +543,8 @@ class Genvis(Vita):
         where = sim > 0.
         indices = where.nonzero(as_tuple=False)[:,1]
         # indices = sim.argmax()
-        # selected_queries = stacked_queries.permute(1,0,2,3)[indices] # qnum, nC, B(1), C
-        selected_queries = stacked_queries.permute(1,0,2,3)[indices].unsqueeze(0)
+        selected_queries = stacked_queries.permute(1,0,2,3)[indices] # qnum, nC, B(1), C
+        # selected_queries = stacked_queries.permute(1,0,2,3)[indices].unsqueeze(0)
         
         video_mask = []
         for i, mf in enumerate(mask_features):
