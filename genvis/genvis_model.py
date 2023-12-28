@@ -563,14 +563,15 @@ class Genvis(Vita):
         mask_pred = retry_if_cuda_oom(F.interpolate)(
             mask_pred,
             size=interim_size,
-            mode="bilinear",
-            align_corners=False,
+            mode="nearest",
+            # align_corners=False,
         ) # L, T, H, W
         
         mask_pred = mask_pred[:, :, : image_size[0], : image_size[1]]
         mask_pred = F.interpolate(
-            mask_pred, size=(out_height, out_width), mode="bilinear", align_corners=False
-        ) > 0.
+            mask_pred, size=(out_height, out_width), mode="nearest", 
+            # align_corners=False
+        )
         
         
         # for i in range(math.ceil(num_frames/self.len_clip_window)):
