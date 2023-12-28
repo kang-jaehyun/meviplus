@@ -317,7 +317,7 @@ class Genvis(Vita):
             prev_aux_clip_indices = aux_clip_indices_list
         
         # all_clip_queries = self.q2t(torch.stack(clip_queries)) # cN, cQ, B, tC
-        last_clip_query = self.q2t(output_q[:,-B:,:]) # cQ, B, tC
+        last_clip_query = self.q2t(clip_queries[-1]) # cQ, B, tC
         text_q = self.t2t(encoded_sentence) # B, tC
         
         # sim = torch.einsum("nqbc,bc->bnq", all_clip_queries, text_q)
@@ -529,20 +529,22 @@ class Genvis(Vita):
         del outputs, images, batched_inputs
         
         
-        last_clip_query = self.q2t(output_q[:,-1:,:]) # cQ, B, tC
+        last_clip_query = self.q2t(clip_queries[-1]) # cQ, B, tC
         text_q = self.t2t(encoded_sentence) # B, tC
         sim = F.cosine_similarity(last_clip_query, text_q[None], dim=-1).permute(1,0) # B, cQ
         
         stacked_queries = torch.stack(clip_queries) # nC, cQ, B(1), C
         # all_clip_queries = self.q2t(stacked_queries) # nC, cQ, B(1), tC
         # text_q = self.t2t(encoded_sentence) # B, tC
-        
+        # mask = torch.einsum("qbc,bchw->qhw", last_clip_query, mask_features[-1]) # nC, H, W
         # sim = torch.einsum("nqbc,bc->bnq", all_clip_queries, text_q)
         # sim = sim.max(dim=1)[0]
         
         where = sim > 0.
         indices = where.nonzero(as_tuple=False)[:,1]
-        selected_queries = stacked_queries.permute(1,0,2,3)[indices] # qnum, nC, B(1), C
+        # indices = sim.argmax()
+        # selected_queries = stacked_queries.permute(1,0,2,3)[indices] # qnum, nC, B(1), C
+        selected_queries = stacked_queries.permute(1,0,2,3)[indices].unsqueeze(0)
         
         video_mask = []
         for i, mf in enumerate(mask_features):
