@@ -523,10 +523,10 @@ class Genvis(Vita):
         video_mask = []
         for i, mf in enumerate(mask_features):
             # mf: T, C, H, W
-            clip_mask = torch.einsum("qbc,tchw->qthw", selected_mask_embed[:,i,:,:], mf) > 0. # qnum, T, H, W
-            clip_mask = clip_mask.sum(dim=0).clamp(max=1)
+            clip_mask = torch.einsum("qbc,tchw->qthw", selected_mask_embed[:,i,:,:], mf) # qnum, T, H, W
+            
             video_mask.append(clip_mask)
-        mask_pred = torch.cat(video_mask, dim=0)[None].float()
+        mask_pred = torch.cat(video_mask, dim=1).float()
                 
         del clip_mask_embed, mask_features
         
@@ -563,15 +563,16 @@ class Genvis(Vita):
         mask_pred = retry_if_cuda_oom(F.interpolate)(
             mask_pred,
             size=interim_size,
-            mode="nearest",
-            # align_corners=False,
-        ) # L, T, H, W
+            mode="bilinear",
+            align_corners=False,
+        ) # Q, T, H, W
         
         mask_pred = mask_pred[:, :, : image_size[0], : image_size[1]]
         mask_pred = F.interpolate(
-            mask_pred, size=(out_height, out_width), mode="nearest", 
-            # align_corners=False
-        )
+            mask_pred, size=(out_height, out_width), mode="bilinear", 
+            align_corners=False
+        ) > 0.
+        mask_pred = mask_pred.sum(dim=0).clamp(max=1)[None]
         
         
         # for i in range(math.ceil(num_frames/self.len_clip_window)):
