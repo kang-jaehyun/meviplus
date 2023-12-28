@@ -177,123 +177,117 @@ class Genvis(Vita):
         return rets
 
     def train_model(self, batched_inputs):
+        num_frames = len(batched_inputs[0]['image'])
+        pre_memory = {"k": [], "v": []}
+        num_clips = num_frames // self.len_clip_window
+        
+        assert num_frames % self.len_clip_window == 0, f"num_frames: {num_frames}, len_clip_window: {self.len_clip_window}"
+        
+        B = len(batched_inputs)
+        L = 3 # TODO: hard coded
+        
         images = []
         for video in batched_inputs:
             for frame in video["image"]:
                 images.append(frame.to(self.device))
         images = [(x - self.pixel_mean) / self.pixel_std for x in images]
         images = ImageList.from_tensors(images, self.size_divisibility)
-
-        texts = []
-        for video in batched_inputs:
-            sentence = video["expressions"]
-            sentence = sentence + '.' if not sentence.endswith('.') else sentence
-            texts.extend([sentence]*self.num_frames)
             
-        # text_emb = [x['lang_tokens'].to(self.device) for x in batched_inputs]
-        # text_emb = torch.cat(text_emb, dim=0)
-
-        # text_mask = [x['lang_mask'].to(self.device) for x in batched_inputs]
-        # text_mask = torch.cat(text_mask, dim=0)
-
-        # with torch.no_grad():
-        #     text_features_all = self.text_encoder(text_emb, attention_mask=text_mask)
-        #     text_features = text_features_all.pooler_output # B, tC
-
-        
-
-        dino_outputs = self.dino(images.tensor, captions=texts)
-        # features = self.backbone(images.tensor)
-        features = {}
-        for i,r in enumerate(['res2', 'res3', 'res4', 'res5']):
-            features[r] = self.feature_proj[i](dino_outputs['backbone_features'][i].decompose()[0])
-        
-        BT = len(images)
-        T = self.num_frames if self.training else BT 
-        B = BT // T
-        frame_queries = torch.stack(dino_outputs['hs'][-3:], dim=0)
-        encoded_sentence = dino_outputs['encoded_sentence'][::T, :] # B, C
-        
-        del dino_outputs
-        
-        gc.collect()
-        torch.cuda.empty_cache()
-        
-        outputs, _, mask_features = self.sem_seg_head(features) # 30, 256, 96, 96
-        
-        _, _, _, C = frame_queries.shape
-        top_indices = torch.topk(frame_queries.max(-1)[0], 100, dim=2)[1]
-        frame_queries = torch.gather(frame_queries, 2, top_indices.unsqueeze(-1).repeat(1,1,1,C))
-        L, BT, fQ, C = frame_queries.shape
-        
-        del features
-
-        mask_features = self.vita_module.vita_mask_features(mask_features)
-        mask_features = mask_features.view(B, self.num_frames, *mask_features.shape[-3:])
-
         # mask classification target
-        frame_targets, video_targets_full = self.prepare_targets(batched_inputs, images)
-
-        # bipartite matching-based loss
-        losses, fg_indices = self.criterion(outputs, frame_targets)
-
-        if self.freeze_detector:
-            losses = dict()
-        
-        for k in list(losses.keys()):
-            if k in self.criterion.weight_dict:
-                losses[k] *= self.criterion.weight_dict[k]
-            else:
-                # remove this loss if not specified in `weight_dict`
-                losses.pop(k)
-
-        num_clips = T // self.len_clip_window
-
-        frame_targets = self.split_frame_targets(frame_targets, B)
+        frame_targets_all, video_targets_full = self.prepare_targets(batched_inputs, images)
+        frame_targets = self.split_frame_targets(frame_targets_all, B)
         video_targets = self.split_video_targets(video_targets_full)
-        fg_indices    = self.split_fg_indices(fg_indices, B)
-
-        frame_queries = frame_queries.reshape(L, B, T, fQ, C)
-        frame_queries = frame_queries.split(self.len_clip_window, dim=2)
-        mask_features = mask_features.split(self.len_clip_window, dim=1)
         
-        pre_memory = {"k": [], "v": []}
-
+        # clip_queries = []
+        # mask_features = []
+        positive_indices = [set() for i in range(B)]
+        
         prev_clip_indices = None
         prev_aux_clip_indices = None
         output_q = self.vita_module.query_feat.weight.unsqueeze(1).repeat(1, L*B, 1) # cQ, LB, C
-        # encoded_sentence = encoded_sentence[None] # 1, B, C
+        losses = dict()
         
-        cQ, LB, C = output_q.shape
-        # text_q = self.text_proj(text_features)[None].repeat(1, L, 1) # 1, LB, C
-        # text_q = text_features[None] # 1, 1, tC
-        clip_mask_embed = []
-        positive_indices = [set() for i in range(B)]
         for c_i in range(num_clips):
-            clip_targets  = video_targets[c_i]
+            images = []
+            for video in batched_inputs:
+                for frame in video["image"][c_i*self.len_clip_window : (c_i+1)*self.len_clip_window]:
+                    images.append(frame.to(self.device))
+            images = [(x - self.pixel_mean) / self.pixel_std for x in images]
+            images = ImageList.from_tensors(images, self.size_divisibility)
+
+            texts = []
+            for video in batched_inputs:
+                sentence = video["expressions"]
+                sentence = sentence + '.' if not sentence.endswith('.') else sentence
+                texts.extend([sentence]*self.len_clip_window)
+
             frame_targets_per_clip = frame_targets[c_i]
-            frame_queries_per_clip = frame_queries[c_i]
-            mask_features_per_clip = mask_features[c_i]
-            fg_indices_per_clip = fg_indices[c_i]
+            clip_targets  = video_targets[c_i]
             
-            output_q = output_q + encoded_sentence[None].repeat(1, L, 1)
-            vita_outputs, output_q = self.vita_module(frame_queries_per_clip.flatten(1,2), pre_memory, output_q)
-            # clip_mask_embed_list.append(output_q.reshape(cQ, L, B, C)[:, -1:, :, :])
-            vita_outputs["pred_masks"] = torch.einsum("lbqc,btchw->lbqthw", vita_outputs["pred_mask_embed"], mask_features_per_clip)
+            with torch.no_grad():
+                dino_outputs = self.dino(images.tensor, captions=texts)
+            
+            features = {}
+            for i,r in enumerate(['res2', 'res3', 'res4', 'res5']):
+                features[r] = self.feature_proj[i](dino_outputs['backbone_features'][i].decompose()[0])
+            
+            T = num_frames
+            BcT = len(images)
+            cT = self.len_clip_window
+            B = BcT // cT
+            frame_queries = torch.stack(dino_outputs['hs'][-3:], dim=0)
+            encoded_sentence = dino_outputs['encoded_sentence'][::cT, :] # B, C
+            
+            # del dino_outputs
+            # gc.collect()
+            # torch.cuda.empty_cache()
+            
+            outputs, _, _mask_features = self.sem_seg_head(features)
+            
+            _, _, _, C = frame_queries.shape
+            top_indices = torch.topk(frame_queries.max(-1)[0], 100, dim=2)[1]
+            frame_queries = torch.gather(frame_queries, 2, top_indices.unsqueeze(-1).repeat(1,1,1,C))
+            L, BcT, fQ, C = frame_queries.shape
+            
+            # del features
+            
+            _mask_features = self.vita_module.vita_mask_features(_mask_features)
+            _mask_features = _mask_features.view(B, cT, *_mask_features.shape[-3:])
+            # mask_features.append(_mask_features)
+            
+            # bipartite matching-based loss
+            assert self.freeze_detector, "Detector should be frozen"
+            _, fg_indices = self.criterion(outputs, frame_targets_all[c_i*self.len_clip_window : (c_i+1)*self.len_clip_window] + \
+                                                            frame_targets_all[num_frames + c_i*self.len_clip_window : num_frames + (c_i+1)*self.len_clip_window])
+            
+            # if self.freeze_detector:
+            #     losses = dict()
+            
+            # for k in list(losses.keys()):
+            #     if k in self.criterion.weight_dict:
+            #         losses[k] *= self.criterion.weight_dict[k]
+            #     else:
+            #         # remove this loss if not specified in `weight_dict`
+            #         losses.pop(k)
+            
+            output_q = output_q + encoded_sentence[None].repeat(1, L, 1) # text-conditioned propagation
+            vita_outputs, output_q = self.vita_module(frame_queries, pre_memory, output_q)
+            # clip_queries_list.append(output_q.reshape(cQ, L, B, C)[:, -1:, :, :])
+            vita_outputs["pred_masks"] = torch.einsum("lbqc,btchw->lbqthw", vita_outputs["pred_mask_embed"], _mask_features)
             
             for out in vita_outputs["aux_outputs"]:
-                out["pred_masks"] = torch.einsum("lbqc,btchw->lbqthw", out["pred_mask_embed"], mask_features_per_clip)
+                out["pred_masks"] = torch.einsum("lbqc,btchw->lbqthw", out["pred_mask_embed"], _mask_features)
 
             genvis_loss_dict, out_clip_indices, aux_clip_indices_list = self.genvis_criterion(
                                                                             outputs=vita_outputs, 
                                                                             clip_targets=clip_targets, 
                                                                             frame_targets=frame_targets_per_clip, 
-                                                                            frame_indices=fg_indices_per_clip, 
+                                                                            frame_indices=fg_indices, 
                                                                             prev_clip_indices=prev_clip_indices, 
                                                                             prev_aux_clip_indices=prev_aux_clip_indices,
                                                                         )
             
-            clip_mask_embed.append(output_q[:,-B:,:].detach())
+            # clip_queries.append(output_q[:,-B:,:].detach())
             for i, (s_i, t_i) in enumerate(out_clip_indices[-B:]):
                     for s in s_i:
                         positive_indices[i].add(s.item())
@@ -315,12 +309,15 @@ class Genvis(Vita):
             # update clip indices
             prev_clip_indices = out_clip_indices
             prev_aux_clip_indices = aux_clip_indices_list
+            
+        # all_clip_queries = self.q2t(torch.stack(clip_queries)) # cN, cQ, B, tC
+        # last_clip_query = clip_queries[-1]
+        last_clip_query = output_q[:,-B:,:].detach()
         
-        # all_clip_mask_embed = self.q2t(torch.stack(clip_mask_embed)) # cN, cQ, B, tC
-        last_clip_query = self.q2t(clip_mask_embed[-1]) # cQ, B, tC
+        last_clip_query = self.q2t(last_clip_query) # cQ, B, tC
         text_q = self.t2t(encoded_sentence) # B, tC
         
-        # sim = torch.einsum("nqbc,bc->bnq", all_clip_mask_embed, text_q)
+        # sim = torch.einsum("nqbc,bc->bnq", all_clip_queries, text_q)
         # sim = torch.einsum("qbc,bc->bq", last_clip_query, text_q)
         # sim = sim.max(dim=1)[0]
         
@@ -337,29 +334,6 @@ class Genvis(Vita):
                 genvis_loss_dict[k] *= genvis_weight_dict[k]
         losses.update(grounding_loss_dict)
         
-        
-        
-        
-        # cQ, cN, B, C = clip_mask_embed.shape
-        # clip_mask_embed = clip_mask_embed.reshape(cQ*cN, B, C)
-        # sentence_emb = encoded_sentence.reshape(1,B,-1)
-        # output, fused_sentence_emb = self.text_decoder(clip_mask_embed, sentence_emb)
-        
-        # mask_features_video = torch.stack(mask_features) # cN, B, T, C, H, W
-        # pred_mask_embed = output["pred_mask_embed"].reshape(B,C) # 1, B, C
-        # pred_masks_fused = torch.einsum("bc,nbtchw->nbthw", pred_mask_embed, mask_features_video) #  cN, B, T, H, W
-
-        # fusion_loss_dict = self.genvis_criterion.loss_fusion(pred_masks_fused, video_targets_full, B)
-        # for k in fusion_loss_dict.keys():
-        #     if k in genvis_weight_dict:
-        #         fusion_loss_dict[k] *= genvis_weight_dict[k]
-        # losses.update(fusion_loss_dict)
-        
-        # output_q_proj = self.vis2text(output_q) # LB, tC
-        # text_outputs, text_q = self.text_decoder(output_q_proj, text_q)
-        # pred_mask_embed_fused = text_outputs["pred_mask_embed"].reshape(L,B,C) 
-        
-        # vita_outputs['pred_masks_fused'] = torch.einsum("lbc,btchw->lbthw", pred_mask_embed_fused, mask_features_per_clip) # L, B, T, H, W
         return losses
 
     def split_frame_targets(self, frame_targets, batch_size):
