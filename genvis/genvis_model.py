@@ -267,7 +267,7 @@ class Genvis(Vita):
         cQ, LB, C = output_q.shape
         # text_q = self.text_proj(text_features)[None].repeat(1, L, 1) # 1, LB, C
         # text_q = text_features[None] # 1, 1, tC
-        clip_queries = []
+        clip_mask_embed = []
         positive_indices = [set() for i in range(B)]
         for c_i in range(num_clips):
             clip_targets  = video_targets[c_i]
@@ -278,7 +278,7 @@ class Genvis(Vita):
             
             output_q = output_q + encoded_sentence[None].repeat(1, L, 1)
             vita_outputs, output_q = self.vita_module(frame_queries_per_clip.flatten(1,2), pre_memory, output_q)
-            # clip_queries_list.append(output_q.reshape(cQ, L, B, C)[:, -1:, :, :])
+            # clip_mask_embed_list.append(output_q.reshape(cQ, L, B, C)[:, -1:, :, :])
             vita_outputs["pred_masks"] = torch.einsum("lbqc,btchw->lbqthw", vita_outputs["pred_mask_embed"], mask_features_per_clip)
             
             for out in vita_outputs["aux_outputs"]:
@@ -293,7 +293,7 @@ class Genvis(Vita):
                                                                             prev_aux_clip_indices=prev_aux_clip_indices,
                                                                         )
             
-            clip_queries.append(output_q[:,-B:,:].detach())
+            clip_mask_embed.append(output_q[:,-B:,:].detach())
             for i, (s_i, t_i) in enumerate(out_clip_indices[-B:]):
                     for s in s_i:
                         positive_indices[i].add(s.item())
@@ -316,11 +316,11 @@ class Genvis(Vita):
             prev_clip_indices = out_clip_indices
             prev_aux_clip_indices = aux_clip_indices_list
         
-        # all_clip_queries = self.q2t(torch.stack(clip_queries)) # cN, cQ, B, tC
-        last_clip_query = self.q2t(clip_queries[-1]) # cQ, B, tC
+        # all_clip_mask_embed = self.q2t(torch.stack(clip_mask_embed)) # cN, cQ, B, tC
+        last_clip_query = self.q2t(clip_mask_embed[-1]) # cQ, B, tC
         text_q = self.t2t(encoded_sentence) # B, tC
         
-        # sim = torch.einsum("nqbc,bc->bnq", all_clip_queries, text_q)
+        # sim = torch.einsum("nqbc,bc->bnq", all_clip_mask_embed, text_q)
         # sim = torch.einsum("qbc,bc->bq", last_clip_query, text_q)
         # sim = sim.max(dim=1)[0]
         
@@ -340,10 +340,10 @@ class Genvis(Vita):
         
         
         
-        # cQ, cN, B, C = clip_queries.shape
-        # clip_queries = clip_queries.reshape(cQ*cN, B, C)
+        # cQ, cN, B, C = clip_mask_embed.shape
+        # clip_mask_embed = clip_mask_embed.reshape(cQ*cN, B, C)
         # sentence_emb = encoded_sentence.reshape(1,B,-1)
-        # output, fused_sentence_emb = self.text_decoder(clip_queries, sentence_emb)
+        # output, fused_sentence_emb = self.text_decoder(clip_mask_embed, sentence_emb)
         
         # mask_features_video = torch.stack(mask_features) # cN, B, T, C, H, W
         # pred_mask_embed = output["pred_mask_embed"].reshape(B,C) # 1, B, C
@@ -465,7 +465,7 @@ class Genvis(Vita):
         cQ, LB, C = output_q.shape
 
 
-        clip_queries = []
+        clip_mask_embed = []
         mask_features = []
         positive_indices = [set()]
         
@@ -500,9 +500,9 @@ class Genvis(Vita):
             
             output_q = output_q + encoded_sentence[None]
             vita_outputs, output_q = self.vita_module(frame_queries, pre_memory, output_q)
-            clip_queries.append(output_q[:,-1:,:])
+            clip_mask_embed.append(vita_outputs["pred_mask_embed"].squeeze(1)) # squeeze batch
             
-            # clip_queries.append(output_q.reshape(cQ, -1, 1, C)[:, -1:, :, :])
+            # clip_mask_embed.append(output_q.reshape(cQ, -1, 1, C)[:, -1:, :, :])
         
             
             # BT is 1 as runs per frame
@@ -526,35 +526,35 @@ class Genvis(Vita):
         out_height = batched_inputs.get("height", image_size[0])  # raw image size before data augmentation
         out_width  = batched_inputs.get("width", image_size[1])
 
-        del outputs, images, batched_inputs
+        # del outputs, batched_inputs
         
         
-        last_clip_query = self.q2t(clip_queries[-1]) # cQ, B, tC
+        last_clip_query = self.q2t(output_q) # cQ, B, tC
         text_q = self.t2t(encoded_sentence) # B, tC
         sim = F.cosine_similarity(last_clip_query, text_q[None], dim=-1).permute(1,0) # B, cQ
         
-        stacked_queries = torch.stack(clip_queries) # nC, cQ, B(1), C
-        # all_clip_queries = self.q2t(stacked_queries) # nC, cQ, B(1), tC
+        stacked_mask_embed = torch.stack(clip_mask_embed) # nC, B(1), cQ, C
+        # all_clip_mask_embed = self.q2t(stacked_mask_embed) # nC, cQ, B(1), tC
         # text_q = self.t2t(encoded_sentence) # B, tC
         # mask = torch.einsum("qbc,bchw->qhw", last_clip_query, mask_features[-1]) # nC, H, W
-        # sim = torch.einsum("nqbc,bc->bnq", all_clip_queries, text_q)
+        # sim = torch.einsum("nqbc,bc->bnq", all_clip_mask_embed, text_q)
         # sim = sim.max(dim=1)[0]
         
         where = sim > 0.
         indices = where.nonzero(as_tuple=False)[:,1]
-        # indices = sim.argmax()
-        selected_queries = stacked_queries.permute(1,0,2,3)[indices] # qnum, nC, B(1), C
-        # selected_queries = stacked_queries.permute(1,0,2,3)[indices].unsqueeze(0)
+        indices = sim.argmax()
+        # selected_mask_embed = stacked_mask_embed.permute(2,0,1,3)[indices] # qnum, nC, B(1), C
+        selected_mask_embed = stacked_mask_embed.permute(2,0,1,3)[indices].unsqueeze(0)
         
         video_mask = []
         for i, mf in enumerate(mask_features):
             # mf: T, C, H, W
-            clip_mask = torch.einsum("qbc,tchw->qthw", selected_queries[:,i,:,:], mf) > 0. # qnum, T, H, W
+            clip_mask = torch.einsum("qbc,tchw->qthw", selected_mask_embed[:,i,:,:], mf) > 0. # qnum, T, H, W
             clip_mask = clip_mask.sum(dim=0).clamp(max=1)
             video_mask.append(clip_mask)
         mask_pred = torch.cat(video_mask, dim=0)[None].float()
                 
-        del clip_queries, mask_features
+        del clip_mask_embed, mask_features
         
         # gc.collect()
         # torch.cuda.empty_cache()
