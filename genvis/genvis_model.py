@@ -13,6 +13,7 @@ from vita.vita_model import Vita
 from .modeling.genvis_criterion import GenvisSetCriterion
 from .modeling.genvis_matcher import GenvisHungarianMatcher
 from .modeling.genvis import GenVIS
+from detectron2.layers import Conv2d, get_norm
 
 from transformers import BertModel, RobertaModel
 # import clip
@@ -51,13 +52,19 @@ class Genvis(Vita):
         self.freeze_detector = kwargs["freeze_detector"]
         self.q2t = q2t
         self.t2t = t2t
-        # self.vis2text = vis2text
-        # self.text_encoder = text_encoder
-        # self.text_decoder = text_decoder
-        self.feature_proj = nn.ModuleList()
-        for i in range(4):
-            self.feature_proj.append(nn.Conv2d(96*(2**i), 256*(2**i), kernel_size=1, bias=False))
         
+        mask_dim = hidden_dim = 256 # TODO
+        num_classes = 1 # TODO
+        # self.decoder_norm = nn.LayerNorm(hidden_dim)
+        # self.class_embed = nn.Linear(hidden_dim, num_classes + 1)
+        # self.mask_embed = MLP(hidden_dim, hidden_dim, mask_dim, 3)
+        lateral_norm = get_norm("GN", hidden_dim)
+        output_norm = get_norm("GN", hidden_dim)
+        
+        self.lateral_conv = Conv2d(hidden_dim, hidden_dim, kernel_size=1, bias=False, norm=lateral_norm)
+        self.output_conv = Conv2d(hidden_dim, hidden_dim, kernel_size=3, padding=1, bias=False, norm=output_norm, activation=F.relu)
+        self.feature_proj = nn.Conv2d(96, 256, kernel_size=1, bias=False)
+        # self.mask_features = Conv2d(hidden_dim, hidden_dim, kernel_size=1, stride=1, padding=0)
         
 
         self.dino = load_model("/workspace/GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py", "/workspace/GroundingDINO/weights/groundingdino_swint_ogc.pth")
@@ -92,8 +99,7 @@ class Genvis(Vita):
             "loss_genvis_ce": class_weight, 
             "loss_genvis_mask": mask_weight, 
             "loss_genvis_dice": dice_weight,
-            "loss_fusion_mask": fusion_mask_weight,
-            "loss_fusion_dice": fusion_dice_weight,
+
             "loss_grounding": grounding_weight,
         }
         if sim_weight > 0.0:
@@ -226,10 +232,13 @@ class Genvis(Vita):
             
             with torch.no_grad():
                 dino_outputs = self.dino(images.tensor, captions=texts)
+                
+            enhanced_features = dino_outputs['enhanced_features']
+            backbone_features = dino_outputs['backbone_features']
             
-            features = {}
-            for i,r in enumerate(['res2', 'res3', 'res4', 'res5']):
-                features[r] = self.feature_proj[i](dino_outputs['backbone_features'][i].decompose()[0])
+            # features = {}
+            # for i,r in enumerate(['res2', 'res3', 'res4', 'res5']):
+            #     features[r] = self.feature_proj[i](backbone_features[i].decompose()[0])
             
             T = num_frames
             BcT = len(images)
@@ -237,17 +246,29 @@ class Genvis(Vita):
             B = BcT // cT
             frame_queries = torch.stack(dino_outputs['hs'][-3:], dim=0)
             encoded_sentence = dino_outputs['encoded_sentence'][::cT, :] # B, C
+
             
             # del dino_outputs
             # gc.collect()
             # torch.cuda.empty_cache()
             
-            outputs, _, _mask_features = self.sem_seg_head(features)
             
             _, _, _, C = frame_queries.shape
-            top_indices = torch.topk(frame_queries.max(-1)[0], 100, dim=2)[1]
+            top_indices = torch.topk(frame_queries.max(-1)[0], 100, dim=2)[1] # TODO : query topk method
             frame_queries = torch.gather(frame_queries, 2, top_indices.unsqueeze(-1).repeat(1,1,1,C))
             L, BcT, fQ, C = frame_queries.shape
+            
+            _mask_features, multi_scale_features = self.mask_features_from_gdino(enhanced_features, backbone_features)
+            # outputs_class = self.class_embed(frame_queries[-1])
+            # mask_embed = self.mask_embed(frame_queries[-1])
+            # outputs_mask = torch.einsum("bqc,bchw->bqhw", mask_embed, mask_features)
+            # outputs = {
+            #     "pred_logits": outputs_class,
+            #     'pred_masks': outputs_mask,
+            # }
+            
+            # outputs, _, _mask_features = self.sem_seg_head(features)
+            # outputs, _, mask_features = self.sem_seg_head.predictor(multi_scale_features, mask_features, clip_mask_features, mask=None)
             
             # del features
             
@@ -257,8 +278,8 @@ class Genvis(Vita):
             
             # bipartite matching-based loss
             assert self.freeze_detector, "Detector should be frozen"
-            _, fg_indices = self.criterion(outputs, frame_targets_all[c_i*self.len_clip_window : (c_i+1)*self.len_clip_window] + \
-                                                            frame_targets_all[num_frames + c_i*self.len_clip_window : num_frames + (c_i+1)*self.len_clip_window])
+            # _, fg_indices = self.criterion(outputs, frame_targets_all[c_i*self.len_clip_window : (c_i+1)*self.len_clip_window] + \
+                                                            # frame_targets_all[num_frames + c_i*self.len_clip_window : num_frames + (c_i+1)*self.len_clip_window])
             
             # if self.freeze_detector:
             #     losses = dict()
@@ -282,7 +303,7 @@ class Genvis(Vita):
                                                                             outputs=vita_outputs, 
                                                                             clip_targets=clip_targets, 
                                                                             frame_targets=frame_targets_per_clip, 
-                                                                            frame_indices=fg_indices, 
+                                                                            # frame_indices=fg_indices, 
                                                                             prev_clip_indices=prev_clip_indices, 
                                                                             prev_aux_clip_indices=prev_aux_clip_indices,
                                                                         )
@@ -335,7 +356,14 @@ class Genvis(Vita):
         losses.update(grounding_loss_dict)
         
         return losses
-
+    def mask_features_from_gdino(self, enhanced_features, backbone_features):
+        x = self.feature_proj(backbone_features[0].decompose()[0]).float()
+        cur_fpn = self.lateral_conv(x)
+        y = cur_fpn + F.interpolate(enhanced_features[-1].permute(0,3,1,2), size=cur_fpn.shape[-2:], mode="bilinear", align_corners=False)
+        y = self.output_conv(y)
+        
+        return y, enhanced_features
+        
     def split_frame_targets(self, frame_targets, batch_size):
         T = self.num_frames
         W = self.len_clip_window
