@@ -259,19 +259,6 @@ class Genvis(Vita):
             L, BcT, fQ, C = frame_queries.shape
             
             _mask_features, multi_scale_features = self.mask_features_from_gdino(enhanced_features, backbone_features)
-            # outputs_class = self.class_embed(frame_queries[-1])
-            # mask_embed = self.mask_embed(frame_queries[-1])
-            # outputs_mask = torch.einsum("bqc,bchw->bqhw", mask_embed, mask_features)
-            # outputs = {
-            #     "pred_logits": outputs_class,
-            #     'pred_masks': outputs_mask,
-            # }
-            
-            # outputs, _, _mask_features = self.sem_seg_head(features)
-            # outputs, _, mask_features = self.sem_seg_head.predictor(multi_scale_features, mask_features, clip_mask_features, mask=None)
-            
-            # del features
-            
             _mask_features = self.vita_module.vita_mask_features(_mask_features)
             _mask_features = _mask_features.view(B, cT, *_mask_features.shape[-3:])
             # mask_features.append(_mask_features)
@@ -483,22 +470,23 @@ class Genvis(Vita):
             texts.extend([sentence]*T)
 
             dino_outputs = self.dino(images.tensor, captions=texts)
-            # features = self.backbone(images.tensor)
-            features = {}
-            for i,r in enumerate(['res2', 'res3', 'res4', 'res5']):
-                features[r] = self.feature_proj[i](dino_outputs['backbone_features'][i].decompose()[0])
-            # features = self.backbone(images.tensor)
             
+            enhanced_features = dino_outputs['enhanced_features']
+            backbone_features = dino_outputs['backbone_features']
             encoded_sentence = dino_outputs['encoded_sentence'][0, :][None]
-            # encoded_sentence = encoded_sentence.reshape(1, 1, T, -1).permute(0,2,1,3)[:,0,:,:] # 1, B(1), C
-            frame_queries = torch.stack(dino_outputs['hs'][-3:], dim=0) # last 3 layer from gdino
             
-            outputs, _, _mask_features = self.sem_seg_head(features)
+            
+            frame_queries = torch.stack(dino_outputs['hs'][-3:], dim=0) # last 3 layer from gdino
             _, _, _, C = frame_queries.shape
             top_indices = torch.topk(frame_queries.max(-1)[0], 100, dim=2)[1]
             frame_queries = torch.gather(frame_queries, 2, top_indices.unsqueeze(-1).repeat(1,1,1,C)) 
             L, BT, fQ, C = frame_queries.shape
-            del features
+            
+            
+            _mask_features, multi_scale_features = self.mask_features_from_gdino(enhanced_features, backbone_features)
+            _mask_features = self.vita_module.vita_mask_features(_mask_features)
+            _mask_features = _mask_features.view(1, T, *_mask_features.shape[-3:])
+            mask_features.append(_mask_features.squeeze(0))
             
             output_q = output_q + encoded_sentence[None]
             vita_outputs, output_q = self.vita_module(frame_queries, pre_memory, output_q)
@@ -508,8 +496,6 @@ class Genvis(Vita):
         
             
             # BT is 1 as runs per frame
-            _mask_features = self.vita_module.vita_mask_features(_mask_features)
-            mask_features.append(_mask_features)
             # mask_features.append(_mask_features)  # T', C, H, W
             
             # mask_cls.append(vita_outputs["pred_logits"][-1])       # 1, cQ, K+1
