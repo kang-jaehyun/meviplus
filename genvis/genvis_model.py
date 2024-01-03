@@ -60,7 +60,10 @@ class Genvis(Vita):
         
         self.feature_proj = nn.Conv2d(96, 256, kernel_size=1, bias=False) # TODO : hard coded
         # self.mask_features = Conv2d(hidden_dim, hidden_dim, kernel_size=1, stride=1, padding=0)
-        
+        self.feature_utilize_level = 3 # TODO : configurable
+        self.multiscale_feature_proj = nn.ModuleList()
+        for i in range(self.feature_utilize_level):
+            self.multiscale_feature_proj.append(Conv2d(hidden_dim, hidden_dim, kernel_size=1, bias=False))
 
         self.dino = dino
 
@@ -280,9 +283,9 @@ class Genvis(Vita):
     def mask_features_from_gdino(self, enhanced_features, backbone_features):
         x = self.feature_proj(backbone_features[0].decompose()[0]).float()
         cur_fpn = self.lateral_conv(x)
-        feature_utilize_level = 3 # TODO : configurable
-        for i in range(feature_utilize_level):
-            y = cur_fpn + F.interpolate(enhanced_features[i].permute(0,3,1,2), size=cur_fpn.shape[-2:], mode="bilinear", align_corners=False)
+        
+        for i in range(self.feature_utilize_level):
+            y = cur_fpn + F.interpolate(self.multiscale_feature_proj[i](enhanced_features[i]).permute(0,3,1,2), size=cur_fpn.shape[-2:], mode="bilinear", align_corners=False)
         y = self.output_conv(y)
         
         return y, enhanced_features
