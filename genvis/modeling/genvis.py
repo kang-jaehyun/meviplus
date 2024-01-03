@@ -24,6 +24,8 @@ class GenVIS(VITA):
         self.pre_query_embed_k = nn.Linear(hidden_dim, hidden_dim)
         self.pre_query_embed_v = nn.Linear(hidden_dim, hidden_dim)
 
+        self.motion_embed = nn.Linear(hidden_dim, hidden_dim)
+        
     def forward(self, frame_query, pre_memory, output):
         """
         L: Number of Layers.
@@ -124,8 +126,6 @@ class GenVIS(VITA):
         pred_cls = self.class_embed(decoder_outputs)
         pred_mask_embed = self.mask_embed(decoder_outputs)
         
-        # pred_text_embed = self.text_projection(decoder_outputs)
-        
         if self.use_sim and self.sim_use_clip:
             pred_cq_embed = self.sim_embed_clip(decoder_outputs)
         else:
@@ -135,9 +135,9 @@ class GenVIS(VITA):
 
         pre_memory_k = self.pre_memory_embed_k(memory_input)[None] # 1, L, B, cQ, C
         pre_memory_v = self.pre_memory_embed_v(memory_input)[None] # 1, L, B, cQ, C
-
+        memory_motion = self.motion_embed(memory_input)[None]      # 1, L, B, cQ, C
+        
         out = {
-            # 'pred_text_embed': pred_text_embed[-1],
             'pred_logits': pred_cls[-1],
             'pred_mask_embed': pred_mask_embed[-1],
             'pred_fq_embed': pred_fq_embed,
@@ -145,7 +145,7 @@ class GenVIS(VITA):
             'aux_outputs': self._set_aux_loss(
                 pred_cls, pred_mask_embed, pred_cq_embed, pred_fq_embed
             ),
-            'pre_memory': {"k": pre_memory_k, "v": pre_memory_v},
+            'pre_memory': {"k": pre_memory_k, "v": pre_memory_v, "motion": memory_motion},
         }
 
         return out, output
