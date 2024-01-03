@@ -285,7 +285,7 @@ class Genvis(Vita):
         cur_fpn = self.lateral_conv(x)
         
         for i in range(self.feature_utilize_level):
-            y = cur_fpn + F.interpolate(self.multiscale_feature_proj[i](enhanced_features[i]).permute(0,3,1,2), size=cur_fpn.shape[-2:], mode="bilinear", align_corners=False)
+            y = cur_fpn + F.interpolate(self.multiscale_feature_proj[i](enhanced_features[i].permute(0,3,1,2)), size=cur_fpn.shape[-2:], mode="bilinear", align_corners=False)
         y = self.output_conv(y)
         
         return y, enhanced_features
