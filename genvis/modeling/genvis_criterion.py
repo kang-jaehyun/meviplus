@@ -113,98 +113,6 @@ class GenvisSetCriterion(nn.Module):
         self.importance_sample_ratio = importance_sample_ratio
         self.sim_use_clip = sim_use_clip
     
-    # def loss_texts(self, outputs, targets, indices, num_masks):
-    #     """
-    #     Contrastive Loss between text embedding and query projection
-    #     """
-    #     assert "pred_text_embed" in outputs
-    #     all_src_texts = outputs["pred_text_embed"] # L, B, cQ, Ct
-    #     # src_masks = outputs["pred_masks"]
-        
-    #     idx = self._get_src_permutation_idx(indices)
-    #     L, B, cQ, Ct = all_src_texts.shape
-        
-    #     src_texts = all_src_texts.reshape(L*B, cQ, Ct)
-    #     # src_masks = src_masks.reshape(L*B, cQ, T, H, W)
-
-    #     # src_masks = src_masks[idx] # Nt x T x Hp x Wp
-    #     src_texts = src_texts[idx] # Nt  x Ct
-    #     # target_masks = []
-    #     valid_targets = []
-    #     target_texts = []
-    #     for t in (targets * L):
-    #         valid_targets.append(t["valid_inst"])
-    #         # target_masks.append(t["masks"])
-    #         target_texts.append(t["texts"])
-            
-    #     # target_masks = torch.cat(target_masks).to(src_masks) # Nt x T x Ht x Wt
-    #     target_texts = torch.cat(target_texts) # Nt x Ct
-    #     valid_targets = torch.cat(valid_targets) # Nt
-        
-    #     target_texts = target_texts.reshape(L, B, Ct)
-        
-    #     # src_masks = src_masks[valid_targets]
-    #     # target_masks = target_masks[valid_targets]
-    #     # matched_src_texts = src_texts[valid_targets]
-        
-    #     cos_dist = torch.einsum('lbqc, lbc -> blq', F.normalize(all_src_texts, dim=-1), F.normalize(target_texts, dim=-1)) # B, L, cQ
-    #     labels = torch.nn.functional.one_hot(torch.tensor(indices)[:,0].reshape(L,B), cQ)
-    #     loss = torch.abs(cos_dist - labels.float())**2
-    #     loss_text = loss.mean(-1).sum()
-        
-    #     losses = {'loss_genvis_text': loss_text}
-        
-    #     return losses
-    def loss_fusion(self, pred_masks, video_targets, num_masks):
-        """
-
-        """
-        cN,B,T,Hp,Wp = pred_masks.shape
-        
-        target_masks = []
-        for t in (video_targets):
-            target_masks.append(t['merged_masks'])
-        target_masks = torch.cat(target_masks) # B*cN*T, Ht, Wt
-        BcNT, Ht, Wt = target_masks.shape
-        
-        pred_masks = pred_masks.permute(1,0,2,3,4).reshape(cN*B*T, 1, Hp, Wp)
-        target_masks = target_masks.reshape(BcNT, 1, Ht, Wt).to(dtype=torch.float16)
-
-        with torch.no_grad():
-            # sample point_coords
-            point_coords = get_uncertain_point_coords_with_randomness(
-                pred_masks,
-                lambda logits: calculate_uncertainty(logits),
-                self.num_points,
-                self.oversample_ratio,
-                self.importance_sample_ratio,
-            )
-            # get gt labels
-            point_labels = point_sample(
-                target_masks,
-                point_coords,
-                align_corners=False,
-            ).squeeze(1)
-
-        point_logits = point_sample(
-            pred_masks,
-            point_coords,
-            align_corners=False,
-        ).squeeze(1)
-        
-        
-        point_logits = point_logits.view(cN*B, T * self.num_points)
-        point_labels = point_labels.view(cN*B, T * self.num_points)
-        
-        losses = {
-            "loss_fusion_mask": sigmoid_ce_loss_jit(point_logits, point_labels, num_masks),
-            "loss_fusion_dice": dice_loss_jit(point_logits, point_labels, num_masks),
-        }
-
-        del pred_masks
-        del target_masks
-        return losses
-    
     def loss_labels(self, outputs, targets, indices, num_masks):
         """Classification loss (NLL)
         targets dicts must contain the key "labels" containing a tensor of dim [nb_target_boxes]
@@ -387,17 +295,17 @@ class GenvisSetCriterion(nn.Module):
     ):
         loss_map = {
             'genvis_masks': self.loss_masks,
-            'genvis_fusion': self.loss_fusion,
+            # 'genvis_fusion': self.loss_fusion,
             'genvis_labels': self.loss_labels,
-            'fg_sim': self.loss_fg_sim,
+            # 'fg_sim': self.loss_fg_sim,
         }
         assert loss in loss_map, f"do you really want to compute {loss} loss?"
-        if loss == 'fg_sim':
-            return loss_map[loss](
-                outputs, clip_targets, frame_targets, clip_indices, frame_indices, num_masks
-            )
-        if loss == 'genvis_fusion':
-            return loss_map[loss](outputs['pred_masks_fused'], clip_targets, num_masks)
+        # if loss == 'fg_sim':
+        #     return loss_map[loss](
+        #         outputs, clip_targets, frame_targets, clip_indices, frame_indices, num_masks
+        #     )
+        # if loss == 'genvis_fusion':
+        #     return loss_map[loss](outputs['pred_masks_fused'], clip_targets, num_masks)
 
         return loss_map[loss](outputs, clip_targets, clip_indices, num_masks)
 
@@ -472,8 +380,6 @@ class GenvisSetCriterion(nn.Module):
                         aux_clip_indices.append((merged_src_idx, merged_tgt_idx))
 
                 for loss in self.losses:
-                    if loss == "fg_sim" or loss == "genvis_fusion":
-                        continue
                     l_dict = self.get_loss(
                         loss, aux_outputs, clip_targets, frame_targets, aux_clip_indices, frame_indices, num_masks
                     )

@@ -135,7 +135,7 @@ class GenVIS(VITA):
 
         pre_memory_k = self.pre_memory_embed_k(memory_input)[None] # 1, L, B, cQ, C
         pre_memory_v = self.pre_memory_embed_v(memory_input)[None] # 1, L, B, cQ, C
-        memory_motion = self.motion_embed(memory_input)[None]      # 1, L, B, cQ, C
+        memory_motion = self.motion_embed(memory_input.detach())[None]      # 1, L, B, cQ, C
         
         out = {
             'pred_logits': pred_cls[-1],

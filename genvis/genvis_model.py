@@ -60,7 +60,7 @@ class Genvis(Vita):
         
         self.feature_proj = nn.Conv2d(96, 256, kernel_size=1, bias=False) # TODO : hard coded
         # self.mask_features = Conv2d(hidden_dim, hidden_dim, kernel_size=1, stride=1, padding=0)
-        self.feature_utilize_level = 3 # TODO : configurable
+        self.feature_utilize_level = 2 # TODO : configurable
         self.multiscale_feature_proj = nn.ModuleList()
         for i in range(self.feature_utilize_level):
             self.multiscale_feature_proj.append(Conv2d(hidden_dim, hidden_dim, kernel_size=1, bias=False))
@@ -285,7 +285,7 @@ class Genvis(Vita):
         cur_fpn = self.lateral_conv(x)
         
         for i in range(self.feature_utilize_level):
-            cur_fpn = cur_fpn + F.interpolate(self.multiscale_feature_proj[i](enhanced_features[i].permute(0,3,1,2)), size=cur_fpn.shape[-2:], mode="bilinear", align_corners=False)
+            cur_fpn = cur_fpn + F.interpolate(self.multiscale_feature_proj[i](enhanced_features[i].permute(0,3,1,2).contiguous()), size=cur_fpn.shape[-2:], mode="bilinear", align_corners=False)
         y = self.output_conv(cur_fpn)
         
         return y, enhanced_features
