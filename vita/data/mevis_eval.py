@@ -121,7 +121,7 @@ class MeViSEvaluator(DatasetEvaluator):
                 cv2.imwrite(os.path.join(video_path, f'{str(i).zfill(5)}.png'), m * 255)
             
         else:
-            target_masks = torch.cat(inputs[0]['gt_masks_merge'])[None].to(pred_masks) # 1, T, H, W
+            target_masks = torch.cat(inputs[0]['gt_masks_merge'])[None].to(pred_masks.device) # 1, T, H, W
             target_masks = retry_if_cuda_oom(F.interpolate)(
                 target_masks.to(dtype=torch.float16),
                 size=(H,W),
@@ -134,8 +134,9 @@ class MeViSEvaluator(DatasetEvaluator):
             j = self.db_eval_iou(target_masks, pred_masks)
             f = self.db_eval_boundary(target_masks, pred_masks)
             
+            # self._Js.append(j.mean().cpu())
             self._Js.append(j.mean().cpu())
-            self._Fs.append(f.mean())
+            self._Fs.append(f.mean().cpu())
         
         
 
@@ -186,7 +187,7 @@ class MeViSEvaluator(DatasetEvaluator):
             assert annotation.shape == void_pixels.shape
         if annotation.ndim == 3:
             n_frames = annotation.shape[0]
-            f_res = torch.zeros(n_frames)
+            f_res = torch.zeros(n_frames, device=segmentation.device)
             for frame_id in range(n_frames):
                 void_pixels_frame = None if void_pixels is None else void_pixels[frame_id, :, :, ]
                 f_res[frame_id] = self.f_measure(segmentation[frame_id, :, :, ], annotation[frame_id, :, :], void_pixels_frame, bound_th=bound_th)

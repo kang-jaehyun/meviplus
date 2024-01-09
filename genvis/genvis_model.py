@@ -287,7 +287,7 @@ class Genvis(Vita):
         for i, ind_set in enumerate(positive_indices):
             labels[i][list(ind_set)] = 1
         
-        pos_weight =  ((B*cQ - labels.sum()) / labels.sum()).clamp(max=cQ)
+        pos_weight =  ((B*cQ - labels.sum()) / labels.sum()).clamp(max=10)
         grounding_loss_dict = {"loss_grounding" : F.binary_cross_entropy_with_logits(sim, labels, pos_weight=pos_weight)}
         grounding_loss_dict_keys = list(genvis_loss_dict.keys())
         
@@ -520,24 +520,24 @@ class Genvis(Vita):
             # mf: T, C, H, W
             clip_mask = torch.einsum("qbc,tchw->qthw", selected_mask_embed[:,i,:,:], mf) # qnum, T, H, W
             # upsample masks
-            clip_mask = retry_if_cuda_oom(F.interpolate)(
-                clip_mask,
-                size=interim_size,
-                mode="bilinear",
-                align_corners=False,
-            ) # Q, T, H, W
+            video_mask.append(clip_mask)
             
-            video_mask.append(clip_mask.to(to_store))
         mask_pred = torch.cat(video_mask, dim=1).float()
+        mask_pred = retry_if_cuda_oom(F.interpolate)(
+            mask_pred,
+            size=interim_size,
+            mode="bilinear",
+            align_corners=False,
+        ) # Q, T, H, W
                 
         del clip_mask_embed, mask_features
         
         mask_pred = mask_pred[:, :, : image_size[0], : image_size[1]]
-        mask_pred = F.interpolate(
+        mask_pred = retry_if_cuda_oom(F.interpolate)(
             mask_pred, size=(out_height, out_width), mode="bilinear", 
             align_corners=False
         ) > 0.
-        mask_pred = mask_pred.sum(dim=0).clamp(max=1)[None]
+        mask_pred = retry_if_cuda_oom(torch.sum)(mask_pred, dim=0).clamp(max=1)[None]
     
 
         processed_results = {
