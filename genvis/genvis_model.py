@@ -289,11 +289,11 @@ class Genvis(Vita):
         
         pos_weight =  ((B*cQ - labels.sum()) / labels.sum()).clamp(max=10)
         grounding_loss_dict = {"loss_grounding" : F.binary_cross_entropy_with_logits(sim, labels, pos_weight=pos_weight)}
-        grounding_loss_dict_keys = list(genvis_loss_dict.keys())
+        grounding_loss_dict_keys = list(grounding_loss_dict.keys())
         
         for k in grounding_loss_dict_keys:
             if k in genvis_weight_dict:
-                genvis_loss_dict[k] *= genvis_weight_dict[k]
+                grounding_loss_dict[k] *= genvis_weight_dict[k]
         losses.update(grounding_loss_dict)
         
         return losses
