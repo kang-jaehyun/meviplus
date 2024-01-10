@@ -68,7 +68,8 @@ class Genvis(Vita):
             self.multiscale_feature_proj.append(Conv2d(hidden_dim, hidden_dim, kernel_size=1, bias=False))
 
         self.dino = dino
-        self.convlstm = ConvLSTMCell(input_dim=96, hidden_dim=256, kernel_size=(3,3), bias=True)
+        self.roi_feature_level = 1 # res3
+        self.convlstm = ConvLSTMCell(input_dim=96 * (self.roi_feature_level + 1), hidden_dim=256, kernel_size=(3,3), bias=True)
         self.feature_shape = (14,14)
         
         for p in self.dino.parameters():
@@ -238,10 +239,6 @@ class Genvis(Vita):
             for out in vita_outputs["aux_outputs"]:
                 out["pred_masks"] = torch.einsum("lbqc,btchw->lbqthw", out["pred_mask_embed"], _mask_features)
 
-            roi_features, bbox = self.get_roi_features(vita_outputs, backbone_features) # cQ*B, T, C, H, W
-            
-            for f in range(self.len_clip_window):
-                h, c = self.convlstm(roi_features[:, f], (h, c), bbox[:, f])
             
             genvis_loss_dict, out_clip_indices, aux_clip_indices_list = self.genvis_criterion(
                                                                             outputs=vita_outputs,
@@ -256,6 +253,10 @@ class Genvis(Vita):
                     for s in s_i:
                         positive_indices[i].add(s.item())
             
+            roi_features, bbox = self.get_roi_features(vita_outputs, backbone_features) # cQ*B, T, C, H, W
+            
+            for f in range(self.len_clip_window):
+                h, c = self.convlstm(roi_features[:, f], (h, c), bbox[:, f])
             
             genvis_weight_dict = self.genvis_criterion.weight_dict
             
@@ -312,18 +313,25 @@ class Genvis(Vita):
         # normalize with H,W
         bbox = bbox.reshape(cQ*B, T, 4)
         bbox = torch.cat((bbox.min(dim=1)[0][:,:2], bbox.max(dim=1)[0][:,2:]), dim=1)[:,None].repeat(1, T, 1).flatten(0,1)
-        bbox = bbox / denominator[None]
         
         # x1, y1, x2, y2 -> cx, cy, dx, dy
         cx, cy = bbox[:, [0,2]].mean(dim=1), bbox[:, [1,3]].mean(dim=1)
         dx = bbox[:, 2] - cx
         dy = bbox[:, 3] - cy
         center_bbox = torch.stack((cx, cy, dx, dy), dim=1)
+        center_bbox = center_bbox / denominator[None]
         
         ind = torch.arange(B*cQ*T).to(bbox.device)
         ind_bbox = torch.concat((ind[:,None], bbox), dim=1) # cQ*B*T, 5 (Batch + bbox)
-
-        _roi_features = torchvision.ops.roi_align(backbone_features[0].decompose()[0].repeat(cQ, 1, 1, 1), ind_bbox, output_size=self.feature_shape)
+        
+        
+        _H, _W = backbone_features[self.roi_feature_level].decompose()[0].shape[-2:]
+        _roi_features = torchvision.ops.roi_align(
+                                        backbone_features[self.roi_feature_level].decompose()[0].repeat(cQ, 1, 1, 1), 
+                                        ind_bbox, 
+                                        output_size=self.feature_shape, 
+                                        spatial_scale=(_H/H)
+                                    )
         roi_features = torch.zeros_like(_roi_features)
         roi_features[non_zero_indices] = _roi_features[non_zero_indices]
         
@@ -515,6 +523,8 @@ class Genvis(Vita):
         # memory explodes when all indices are selected
         if indices.numel() > 5:
             indices = sim.topk(5)[1].flatten()
+        elif indices.numel == 0:
+            indices = sim.topk(1)[1].flatten()
         # indices = sim.argmax()
         selected_mask_embed = stacked_mask_embed.permute(2,0,1,3)[indices] # qnum, nC, B(1), C
         # selected_mask_embed = stacked_mask_embed.permute(2,0,1,3)[indices].unsqueeze(0)
