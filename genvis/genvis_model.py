@@ -298,7 +298,7 @@ class Genvis(Vita):
         
         return losses
     
-    def get_roi_features(self, outputs, backbone_features, feature_shape=(14,14)):
+    def get_roi_features(self, outputs, backbone_features):
         bmask = outputs['pred_masks'][-1] > 0
         B, cQ, T, H, W = bmask.shape
         bmask = bmask.permute(1,0,2,3,4).flatten(0,2) # cQ*B*T, H, W
@@ -483,7 +483,7 @@ class Genvis(Vita):
             clip_mask_embed.append(vita_outputs["pred_mask_embed"].squeeze(1)) # squeeze batch
             vita_outputs["pred_masks"] = torch.einsum("lbqc,btchw->lbqthw", vita_outputs["pred_mask_embed"], _mask_features)
             
-            roi_features, bbox = self.get_roi_features(vita_outputs, backbone_features, feature_shape=self.feature_shape) # cQ*B, T, C, H, W
+            roi_features, bbox = self.get_roi_features(vita_outputs, backbone_features) # cQ*B, T, C, H, W
             
             for f in range(T):
                 h, c = self.convlstm(roi_features[:, f], (h, c), bbox[:, f])
@@ -511,6 +511,10 @@ class Genvis(Vita):
         
         where = sim > 0.
         indices = where.nonzero(as_tuple=False)[:,1]
+        
+        # memory explodes when all indices are selected
+        if indices.numel() > 5:
+            indices = sim.topk(5)[1].flatten()
         # indices = sim.argmax()
         selected_mask_embed = stacked_mask_embed.permute(2,0,1,3)[indices] # qnum, nC, B(1), C
         # selected_mask_embed = stacked_mask_embed.permute(2,0,1,3)[indices].unsqueeze(0)
@@ -574,13 +578,27 @@ class ConvLSTMCell(nn.Module):
         self.kernel_size = kernel_size
         self.padding = kernel_size[0] // 2, kernel_size[1] // 2
         self.bias = bias
+        self.conv = nn.Sequential(
+            Conv2d(
+                in_channels=self.input_dim + self.hidden_dim,
+                out_channels=2 * self.hidden_dim,
+                kernel_size=self.kernel_size,
+                padding=self.padding,
+                bias=self.bias,
+                norm = get_norm("GN", 2 * self.hidden_dim),
+            ),
+            Conv2d(
+                in_channels=2 * self.hidden_dim,
+                out_channels=4 * self.hidden_dim,
+                kernel_size=self.kernel_size,
+                padding=self.padding,
+                bias=self.bias,
+                norm = get_norm("GN", 4 * self.hidden_dim),
+                activation=F.relu,
+            )
+        )
 
-        self.conv = nn.Conv2d(in_channels=self.input_dim + self.hidden_dim,
-                              out_channels=4 * self.hidden_dim,
-                              kernel_size=self.kernel_size,
-                              padding=self.padding,
-                              bias=self.bias)
-        self.bbox_enc = nn.Conv2d(in_channels=4, out_channels=self.input_dim, kernel_size=1, bias=False)
+        self.bbox_enc = Conv2d(in_channels=4, out_channels=self.input_dim, kernel_size=1, bias=False)
         
     def forward(self, input_tensor, cur_state, bbox):
         h_cur, c_cur = cur_state
@@ -602,5 +620,5 @@ class ConvLSTMCell(nn.Module):
 
     def init_hidden(self, batch_size, image_size):
         height, width = image_size
-        return (torch.zeros(batch_size, self.hidden_dim, height, width, device=self.conv.weight.device),
-                torch.zeros(batch_size, self.hidden_dim, height, width, device=self.conv.weight.device))
+        return (torch.zeros(batch_size, self.hidden_dim, height, width, device=self.bbox_enc.weight.device),
+                torch.zeros(batch_size, self.hidden_dim, height, width, device=self.bbox_enc.weight.device))
