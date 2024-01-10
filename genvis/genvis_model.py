@@ -186,7 +186,7 @@ class Genvis(Vita):
         output_q = self.vita_module.query_feat.weight.unsqueeze(1).repeat(1, L*B, 1) # cQ, LB, C
         losses = dict()
         
-        h, c = self.convlstm.init_hidden(B*cQ, self.feature_shape) # roi aligned feature
+        h, c = self.convlstm.init_hidden(B*cQ, self.feature_shape, self.device) # roi aligned feature
         for c_i in range(num_clips):
             images = []
             for video in batched_inputs:
@@ -238,7 +238,7 @@ class Genvis(Vita):
             for out in vita_outputs["aux_outputs"]:
                 out["pred_masks"] = torch.einsum("lbqc,btchw->lbqthw", out["pred_mask_embed"], _mask_features)
 
-            roi_features, bbox = self.get_roi_features(vita_outputs, backbone_features, feature_shape=self.feature_shape) # cQ*B, T, C, H, W
+            roi_features, bbox = self.get_roi_features(vita_outputs, backbone_features) # cQ*B, T, C, H, W
             
             for f in range(self.len_clip_window):
                 h, c = self.convlstm(roi_features[:, f], (h, c), bbox[:, f])
@@ -446,7 +446,7 @@ class Genvis(Vita):
         clip_mask_embed = []
         mask_features = []
         
-        h, c = self.convlstm.init_hidden(1*cQ, self.feature_shape) # roi aligned feature
+        h, c = self.convlstm.init_hidden(1*cQ, self.feature_shape, self.device) # roi aligned feature
         for i in range(math.ceil(num_frames / self.len_clip_window)):
             images = batched_inputs["image"][i*self.len_clip_window : (i+1)*self.len_clip_window]
             images = [(x.to(self.device) - self.pixel_mean) / self.pixel_std for x in images]
@@ -618,7 +618,7 @@ class ConvLSTMCell(nn.Module):
 
         return h_next, c_next
 
-    def init_hidden(self, batch_size, image_size):
+    def init_hidden(self, batch_size, image_size, device):
         height, width = image_size
-        return (torch.zeros(batch_size, self.hidden_dim, height, width, device=self.bbox_enc.weight.device),
-                torch.zeros(batch_size, self.hidden_dim, height, width, device=self.bbox_enc.weight.device))
+        return (torch.zeros(batch_size, self.hidden_dim, height, width, device=device),
+                torch.zeros(batch_size, self.hidden_dim, height, width, device=device))
