@@ -297,13 +297,13 @@ class GenvisSetCriterion(nn.Module):
             'genvis_masks': self.loss_masks,
             # 'genvis_fusion': self.loss_fusion,
             'genvis_labels': self.loss_labels,
-            # 'fg_sim': self.loss_fg_sim,
+            'fg_sim': self.loss_fg_sim,
         }
         assert loss in loss_map, f"do you really want to compute {loss} loss?"
-        # if loss == 'fg_sim':
-        #     return loss_map[loss](
-        #         outputs, clip_targets, frame_targets, clip_indices, frame_indices, num_masks
-        #     )
+        if loss == 'fg_sim':
+            return loss_map[loss](
+                outputs, clip_targets, frame_targets, clip_indices, frame_indices, num_masks
+            )
         # if loss == 'genvis_fusion':
         #     return loss_map[loss](outputs['pred_masks_fused'], clip_targets, num_masks)
 

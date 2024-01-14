@@ -25,6 +25,7 @@ dist/
 wheels/
 
 # pytorch/python/numpy formats
+*.pt
 *.pth
 *.pkl
 *.npy
