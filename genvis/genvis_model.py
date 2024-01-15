@@ -28,7 +28,7 @@ from detectron2.projects.point_rend.point_features import (
 from typing import Optional
 from xdecoder.modeling.BaseModel import BaseModel
 from xdecoder.modeling import build_model
-import gc
+from positional_encodings.torch_encodings import PositionalEncoding2D
 
 @META_ARCH_REGISTRY.register()
 class Genvis(Vita):
@@ -39,9 +39,9 @@ class Genvis(Vita):
         len_clip_window: int,
         genvis_criterion: nn.Module,
         motion2text: nn.Module,
-        text2text: nn.Module,
         xdecoder: nn.Module,
-        hidden_dim: int,
+        mask2former_hidden_dim: int,
+        xdecoder_hidden_dim: int,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -49,22 +49,27 @@ class Genvis(Vita):
         self.len_clip_window = len_clip_window
         self.genvis_criterion = genvis_criterion
         self.freeze_detector = kwargs["freeze_detector"]
-        # self.motion2text = motion2text
-        # self.text2text = text2text
+        self.motion2text = motion2text
         
-        self.hidden_dim = hidden_dim
-        # self.roi_from = 'res3' # TODO : configurable
-        # roi_feature_level = int(self.roi_from[-1]) - 1
+        self.mask2former_hidden_dim = mask2former_hidden_dim
+        self.xdecoder_hidden_dim = xdecoder_hidden_dim
+        
+        self.roi_from = 'res3' # TODO : configurable
+        roi_feature_level = int(self.roi_from[-1]) - 1
 
-        # lateral_norm = get_norm("GN", hidden_dim)
-        # output_norm = get_norm("GN", hidden_dim)
-        # 
-        # self.lateral_conv = Conv2d(hidden_dim, hidden_dim, kernel_size=1, bias=False, norm=lateral_norm)
-        # self.output_conv = Conv2d(hidden_dim, hidden_dim, kernel_size=3, padding=1, bias=False, norm=output_norm, activation=F.relu)
-        # 
-        # self.convlstm = ConvLSTMCell(input_dim=96 * roi_feature_level, hidden_dim=hidden_dim, kernel_size=(3,3), bias=True) # TODO hidden dim configurable
-        # self.roi_feature_shape = (14,14)
-        # 
+        self.query_proj = nn.Sequential(
+                                        MLP(
+                                            input_dim=xdecoder_hidden_dim, 
+                                            hidden_dim=xdecoder_hidden_dim, 
+                                            output_dim=mask2former_hidden_dim,
+                                            num_layers=3
+                                            ),
+                                        nn.LayerNorm(mask2former_hidden_dim)
+                                        )
+
+        self.convlstm = ConvLSTMCell(input_dim=96 * roi_feature_level, hidden_dim=mask2former_hidden_dim, kernel_size=(3,3), bias=True) # TODO hidden dim configurable
+        self.roi_feature_shape = (14,14)
+        
         self.xdecoder = xdecoder.eval().cuda()
         
         # freeze xdecoder
@@ -87,6 +92,7 @@ class Genvis(Vita):
         mask_weight  = cfg.MODEL.MASK_FORMER.MASK_WEIGHT
         sim_weight   = cfg.MODEL.VITA.SIM_WEIGHT
         grounding_weight = cfg.MODEL.GENVIS.GROUNDING_WEIGHT
+        
         
         genvis_matcher = GenvisHungarianMatcher(
             cost_class=class_weight,
@@ -136,13 +142,7 @@ class Genvis(Vita):
         motion2text = MLP(
             input_dim = cfg.MODEL.VITA.HIDDEN_DIM,
             hidden_dim = cfg.MODEL.VITA.HIDDEN_DIM,
-            output_dim = cfg.MODEL.VITA.HIDDEN_DIM,
-            num_layers = cfg.MODEL.GENVIS.PROJ_LAYERS,
-        )
-        text2text = MLP(
-            input_dim = cfg.MODEL.VITA.HIDDEN_DIM,
-            hidden_dim = cfg.MODEL.VITA.HIDDEN_DIM,
-            output_dim = cfg.MODEL.VITA.HIDDEN_DIM,
+            output_dim = cfg.XDECODER.MODEL.ENCODER.MASK_DIM,
             num_layers = cfg.MODEL.GENVIS.PROJ_LAYERS,
         )
         xdecoder = BaseModel(cfg.XDECODER, build_model(cfg.XDECODER)).from_pretrained(cfg.XDECODER.MODEL.WEIGHTS)
@@ -151,9 +151,9 @@ class Genvis(Vita):
             "len_clip_window": cfg.MODEL.GENVIS.LEN_CLIP_WINDOW,
             "genvis_criterion": genvis_criterion,
             "motion2text": motion2text,
-            "text2text": text2text,
             "xdecoder": xdecoder,
-            "hidden_dim": cfg.MODEL.VITA.HIDDEN_DIM,
+            "mask2former_hidden_dim": cfg.MODEL.VITA.HIDDEN_DIM,
+            "xdecoder_hidden_dim": cfg.XDECODER.MODEL.ENCODER.MASK_DIM,
         })
 
         return rets
@@ -181,14 +181,14 @@ class Genvis(Vita):
         frame_targets = self.split_frame_targets(frame_targets_all, B)
         video_targets = self.split_video_targets(video_targets_full)
         
-        # positive_indices = [set() for i in range(B)]
+        positive_indices = [set() for i in range(B)]
         
         prev_clip_indices = None
         prev_aux_clip_indices = None
         output_q = self.vita_module.query_feat.weight.unsqueeze(1).repeat(1, L*B, 1) # cQ, LB, C
         losses = dict()
         
-        # h, c = self.convlstm.init_hidden(B*cQ, self.roi_feature_shape, self.device) # roi aligned feature
+        h, c = self.convlstm.init_hidden(B*cQ, self.roi_feature_shape, self.device) # roi aligned feature
         for c_i in range(num_clips):
             images = []
             for video in batched_inputs:
@@ -219,6 +219,7 @@ class Genvis(Vita):
                 features = self.xdecoder.model.backbone(images.tensor)
                 outputs, frame_queries, _mask_features = self.xdecoder.model.sem_seg_head(features, extra=extra, task='grounding_eval')
             
+            frame_queries = self.query_proj(frame_queries)
             
             T = num_frames
             BcT = len(images)
@@ -254,14 +255,14 @@ class Genvis(Vita):
                                                                             prev_aux_clip_indices=prev_aux_clip_indices,
                                                                         )
 
-            # for i, (s_i, t_i) in enumerate(out_clip_indices[-B:]):
-            #         for s in s_i:
-            #             positive_indices[i].add(s.item())
-            # 
-            # roi_features, bbox = self.get_roi_features(vita_outputs, features) # cQ*B, T, C, H, W
-            # 
-            # for f in range(self.len_clip_window):
-            #     h, c = self.convlstm(roi_features[:, f], (h, c), bbox[:, f])
+            for i, (s_i, t_i) in enumerate(out_clip_indices[-B:]):
+                    for s in s_i:
+                        positive_indices[i].add(s.item())
+
+            roi_features, box_rois = self.get_roi_features(vita_outputs, features) # cQ*B, T, C, H, W
+            
+            for f in range(self.len_clip_window):
+                h, c = self.convlstm(roi_features[:, f], (h, c), box_rois[:, f])
             
             genvis_weight_dict = self.genvis_criterion.weight_dict
             
@@ -282,23 +283,23 @@ class Genvis(Vita):
             prev_aux_clip_indices = aux_clip_indices_list
         
 
-        # last_hidden_state = nn.AdaptiveAvgPool2d((1,1))(h.reshape(cQ, B, *h.shape[-3:])).reshape(cQ, B, -1) # cQ, B, flattened feature_shape
-        # motion_emb = self.motion2text(last_hidden_state) # cQ, B, C
-        # # motion_emb = self.motion2text(h.reshape(cQ, B, h.shape[-3], feature_shape[0]*feature_shape[1]))
+        last_hidden_state = nn.AdaptiveAvgPool2d((1,1))(h.reshape(cQ, B, *h.shape[-3:])).reshape(cQ, B, -1) # cQ, B, flattened feature_shape
+        motion_emb = self.motion2text(last_hidden_state) # cQ, B, C
+        # motion_emb = self.motion2text(h.reshape(cQ, B, h.shape[-3], feature_shape[0]*feature_shape[1]))
 
-        # sim = F.cosine_similarity(motion_emb, class_embeddings, dim=-1).permute(1,0) # B, cQ
-        # labels = torch.zeros_like(sim)
-        # for i, ind_set in enumerate(positive_indices):
-        #     labels[i][list(ind_set)] = 1
+        sim = F.cosine_similarity(motion_emb, class_embeddings, dim=-1).permute(1,0) # B, cQ
+        labels = torch.zeros_like(sim)
+        for i, ind_set in enumerate(positive_indices):
+            labels[i][list(ind_set)] = 1
         
-        # pos_weight =  ((B*cQ - labels.sum()) / labels.sum()).clamp(max=5)
-        # grounding_loss_dict = {"loss_grounding" : F.binary_cross_entropy_with_logits(sim, labels, pos_weight=pos_weight)}
-        # grounding_loss_dict_keys = list(grounding_loss_dict.keys())
+        pos_weight =  ((B*cQ - labels.sum()) / labels.sum()).clamp(max=5)
+        grounding_loss_dict = {"loss_grounding" : F.binary_cross_entropy_with_logits(sim, labels, pos_weight=pos_weight)}
+        grounding_loss_dict_keys = list(grounding_loss_dict.keys())
         
-        # for k in grounding_loss_dict_keys:
-        #     if k in genvis_weight_dict:
-        #         grounding_loss_dict[k] *= genvis_weight_dict[k]
-        # losses.update(grounding_loss_dict)
+        for k in grounding_loss_dict_keys:
+            if k in genvis_weight_dict:
+                grounding_loss_dict[k] *= genvis_weight_dict[k]
+        losses.update(grounding_loss_dict)
         
         return losses
     
@@ -312,6 +313,7 @@ class Genvis(Vita):
         nonzero_bmask = bmask[non_zero_indices]
         bbox[non_zero_indices] = torchvision.ops.masks_to_boxes(nonzero_bmask)
         denominator = torch.tensor([W, H, W, H]).to(bbox.device)
+
         
         # normalize with H,W
         bbox = bbox.reshape(cQ*B, T, 4)
@@ -328,7 +330,24 @@ class Genvis(Vita):
         ind_bbox = torch.concat((ind[:,None], bbox), dim=1) # cQ*B*T, 5 (Batch ind + bbox)
         
         
-        _H, _W = features[self.roi_from].shape[-2:]
+        C, _H, _W = features[self.roi_from].shape[-3:]
+        if not hasattr(self, "pos_enc"):
+            self.pos_enc = PositionalEncoding2D(C)
+            self.pos_enc = self.pos_enc.to(self.device)
+        
+        template = self.pos_enc(torch.zeros(T, H, W, C).permute(0,3,1,2).to(self.device))
+        box_rois = torch.zeros(cQ*B*T, C, *self.roi_feature_shape).to(self.device)
+        
+        box_rois[non_zero_indices] = torchvision.ops.roi_align(
+                                        template.repeat(cQ*B, 1, 1, 1),
+                                        ind_bbox,
+                                        output_size=self.roi_feature_shape,
+                                        spatial_scale=(_H/H),
+                                        )[non_zero_indices]
+        
+        
+        
+        
         _roi_features = torchvision.ops.roi_align(
                                         features[self.roi_from].repeat(cQ, 1, 1, 1), 
                                         ind_bbox, 
@@ -339,8 +358,9 @@ class Genvis(Vita):
         roi_features[non_zero_indices] = _roi_features[non_zero_indices]
         
         roi_features = roi_features.reshape(cQ*B, T, *roi_features.shape[-3:])
+        box_rois = box_rois.reshape(cQ*B, T, *box_rois.shape[-3:])
         center_bbox = center_bbox.reshape(cQ*B, T, 4)
-        return roi_features, center_bbox
+        return roi_features, box_rois
         
     def split_frame_targets(self, frame_targets, batch_size):
         T = self.num_frames
@@ -452,29 +472,31 @@ class Genvis(Vita):
             images = batched_inputs["image"][i*self.len_clip_window : (i+1)*self.len_clip_window]
             images = [(x.to(self.device) - self.pixel_mean) / self.pixel_std for x in images]
             images = ImageList.from_tensors(images, self.size_divisibility)
-            
             T = images.tensor.shape[0]
+            
+            extra = {}
             texts = []
+            class_embeddings = []
+            # for video in batched_inputs:
             sentence = batched_inputs["expressions"]
-            sentence = sentence + '.' if not sentence.endswith('.') else sentence
-            texts.extend([sentence]*T)
+            gtext = self.xdecoder.model.sem_seg_head.predictor.lang_encoder.get_text_token_embeddings([sentence], name='grounding', token=False, norm=False)
+            token_emb = gtext['token_emb']
+            tokens = gtext['tokens']
+            query_emb = token_emb[tokens['attention_mask'].bool()]
+            texts.append(query_emb)
+            class_embeddings.append(gtext['class_emb'])
+            
+            grounding_tokens = nn.utils.rnn.pad_sequence(texts)
+            class_embeddings = torch.cat(class_embeddings, dim=0)
+            extra['grounding_tokens'] = grounding_tokens.repeat_interleave(T, dim=1)
 
-            dino_outputs = self.dino(images.tensor, captions=texts)
-            
-            enhanced_features = dino_outputs['enhanced_features']
-            backbone_features = dino_outputs['backbone_features']
-            encoded_sentence = dino_outputs['encoded_sentence'][0, :][None]
-            logits = dino_outputs['pred_logits'][None] # 1, B, 900, C
-            
-            frame_queries = torch.stack(dino_outputs['hs'][-self.num_decoder_layers:], dim=0) # last 3 layer from gdino
-            _, _, _, C = frame_queries.shape
-            top_indices = torch.topk(logits.max(-1)[0], 100, dim=2)[1]
-            # top_indices = torch.topk(frame_queries.max(-1)[0], 100, dim=2)[1]
-            frame_queries = torch.gather(frame_queries, 2, top_indices.unsqueeze(-1).repeat(self.num_decoder_layers,1,1,C)) 
-            # frame_queries = torch.gather(frame_queries, 2, top_indices.unsqueeze(-1).repeat(1,1,1,C)) 
+            with torch.no_grad():
+                features = self.xdecoder.model.backbone(images.tensor)
+                outputs, frame_queries, _mask_features = self.xdecoder.model.sem_seg_head(features, extra=extra, task='grounding_eval')
+            frame_queries = self.query_proj(frame_queries)
+
             L, BT, fQ, C = frame_queries.shape
             
-            _mask_features, multi_scale_features = self.mask_features_from_gdino(enhanced_features, backbone_features)
             _mask_features = self.vita_module.vita_mask_features(_mask_features)
             _mask_features = _mask_features.view(1, T, *_mask_features.shape[-3:])
             mask_features.append(_mask_features.squeeze(0))
@@ -484,10 +506,10 @@ class Genvis(Vita):
             clip_mask_embed.append(vita_outputs["pred_mask_embed"].squeeze(1)) # squeeze batch
             vita_outputs["pred_masks"] = torch.einsum("lbqc,btchw->lbqthw", vita_outputs["pred_mask_embed"], _mask_features)
             
-            roi_features, bbox = self.get_roi_features(vita_outputs, backbone_features) # cQ*B, T, C, H, W
+            roi_features, box_rois = self.get_roi_features(vita_outputs, features) # cQ*B, T, C, H, W
             
             for f in range(T):
-                h, c = self.convlstm(roi_features[:, f], (h, c), bbox[:, f])
+                h, c = self.convlstm(roi_features[:, f], (h, c), box_rois[:, f])
                 
             # update memory
             pre_memory["k"].append(vita_outputs["pre_memory"]["k"])
@@ -505,8 +527,7 @@ class Genvis(Vita):
         
         last_hidden_state = nn.AdaptiveAvgPool2d((1,1))(h.reshape(cQ, 1, *h.shape[-3:])).reshape(cQ, 1, -1) # cQ, B, flattened feature_shape
         motion_emb = self.motion2text(last_hidden_state) # cQ, B, C
-        text_emb = self.text2text(encoded_sentence) # B, tC
-        sim = F.cosine_similarity(motion_emb, text_emb[None], dim=-1).permute(1,0) # B, cQ
+        sim = F.cosine_similarity(motion_emb, class_embeddings, dim=-1).permute(1,0) # B, cQ
         
         stacked_mask_embed = torch.stack(clip_mask_embed) # nC, B(1), cQ, C
         
@@ -584,7 +605,7 @@ class ConvLSTMCell(nn.Module):
         self.bias = bias
         self.conv = nn.Sequential(
             Conv2d(
-                in_channels=self.input_dim + self.hidden_dim,
+                in_channels=self.input_dim * 2 + self.hidden_dim,
                 out_channels=2 * self.hidden_dim,
                 kernel_size=self.kernel_size,
                 padding=self.padding,
@@ -601,13 +622,10 @@ class ConvLSTMCell(nn.Module):
                 activation=F.relu,
             )
         )
-
-        self.bbox_enc = Conv2d(in_channels=4, out_channels=self.input_dim, kernel_size=1, bias=False)
         
-    def forward(self, input_tensor, cur_state, bbox):
+    def forward(self, input_tensor, cur_state, box_rois):
         h_cur, c_cur = cur_state
-        bbox = self.bbox_enc(bbox[:,:,None, None])
-        input_tensor = input_tensor + bbox
+        input_tensor = torch.cat([box_rois, input_tensor], dim=1)
         combined = torch.cat([input_tensor, h_cur], dim=1)  # concatenate along channel axis
 
         combined_conv = self.conv(combined)
