@@ -87,11 +87,12 @@ class HungarianMatcher(nn.Module):
             cost_dice: This is the relative weight of the dice loss of the binary mask in the matching cost
         """
         super().__init__()
-        self.cost_class = cost_class
+        # self.cost_class = cost_class
         self.cost_mask = cost_mask
         self.cost_dice = cost_dice
 
-        assert cost_class != 0 or cost_mask != 0 or cost_dice != 0, "all costs cant be 0"
+        # assert cost_class != 0 or cost_mask != 0 or cost_dice != 0, "all costs cant be 0"
+        assert cost_mask != 0 or cost_dice != 0, "all costs cant be 0"
 
         self.num_points = num_points
 
@@ -105,13 +106,13 @@ class HungarianMatcher(nn.Module):
         # Iterate through batch size
         for b in range(bs):
 
-            out_prob = outputs["pred_logits"][b].softmax(-1)  # [num_queries, num_classes]
-            tgt_ids = targets[b]["labels"]
+            # out_prob = outputs["pred_logits"][b].softmax(-1)  # [num_queries, num_classes]
+            # tgt_ids = targets[b]["labels"]
 
             # Compute the classification cost. Contrary to the loss, we don't use the NLL,
             # but approximate it in 1 - proba[target class].
             # The 1 is a constant that doesn't change the matching, it can be ommitted.
-            cost_class = -out_prob[:, tgt_ids]
+            # cost_class = -out_prob[:, tgt_ids]
 
             out_mask = outputs["pred_masks"][b]  # [num_queries, H_pred, W_pred]
             # gt masks are already padded when preparing target
@@ -146,7 +147,7 @@ class HungarianMatcher(nn.Module):
             # Final cost matrix
             C = (
                 self.cost_mask * cost_mask
-                + self.cost_class * cost_class
+                # + self.cost_class * cost_class
                 + self.cost_dice * cost_dice
             )
             C = C.reshape(num_queries, -1).cpu()
@@ -184,7 +185,7 @@ class HungarianMatcher(nn.Module):
     def __repr__(self, _repr_indent=4):
         head = "Matcher " + self.__class__.__name__
         body = [
-            "cost_class: {}".format(self.cost_class),
+            # "cost_class: {}".format(self.cost_class),
             "cost_mask: {}".format(self.cost_mask),
             "cost_dice: {}".format(self.cost_dice),
         ]
