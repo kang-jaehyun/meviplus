@@ -529,7 +529,7 @@ class Genvis(Vita):
         motion_emb = self.motion2text(last_hidden_state) # cQ, B, C
         sim = F.cosine_similarity(motion_emb, class_embeddings, dim=-1).permute(1,0) # B, cQ
         
-        stacked_mask_embed = torch.stack(clip_mask_embed) # nC, B(1), cQ, C
+        stacked_mask_embed = torch.stack(clip_mask_embed).permute(2,0,1,3) # nC, B(1), cQ, C -> cQ, nC, B(1), C
         
         where = sim > 0.
         indices = where.nonzero(as_tuple=False)[:,1]
@@ -541,17 +541,23 @@ class Genvis(Vita):
             indices = sim.topk(1)[1].flatten()
         indices = sim.topk(1)[1].flatten()
         # indices = sim.argmax()
-        selected_mask_embed = stacked_mask_embed.permute(2,0,1,3)[indices] # qnum, nC, B(1), C
+        selected_mask_embed = stacked_mask_embed[indices] # qnum, nC, B(1), C
         # selected_mask_embed = stacked_mask_embed.permute(2,0,1,3)[indices].unsqueeze(0)
         
         video_mask = []
         for i, mf in enumerate(mask_features):
             # mf: T, C, H, W
-            clip_mask = torch.einsum("qbc,tchw->qthw", selected_mask_embed[:,i,:,:], mf) # qnum, T, H, W
+            all_clip_mask = torch.einsum("qbc,tchw->qthw", stacked_mask_embed[:,i,:,:], mf) # qnum, T, H, W
             # upsample masks
-            video_mask.append(clip_mask)
+            video_mask.append(all_clip_mask)
+        
             
         mask_pred = torch.cat(video_mask, dim=1).float()
+        H_cur, W_cur = mask_pred.shape[-2:]
+        H_small, W_small = image_size[0] * H_cur // interim_size[0], image_size[1] * W_cur // interim_size[1]
+        all_mask_pred = mask_pred[:,:, :H_small, :W_small] > 0.
+        mask_pred = mask_pred[indices]
+        
         mask_pred = retry_if_cuda_oom(F.interpolate)(
             mask_pred,
             size=interim_size,
@@ -562,16 +568,21 @@ class Genvis(Vita):
         del clip_mask_embed, mask_features
         
         mask_pred = mask_pred[:, :, : image_size[0], : image_size[1]]
+        
+        
         mask_pred = retry_if_cuda_oom(F.interpolate)(
             mask_pred, size=(out_height, out_width), mode="bilinear", 
             align_corners=False
         ) > 0.
+
         mask_pred = retry_if_cuda_oom(torch.sum)(mask_pred, dim=0).clamp(max=1)[None]
     
 
         processed_results = {
             "image_size": (out_height, out_width),
             "pred_masks": mask_pred.to(self.device),
+            "all_pred_masks": all_mask_pred.to(self.device),
+            "image_small_size": (H_small, W_small),
         }
 
         return processed_results
