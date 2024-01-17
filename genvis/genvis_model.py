@@ -288,9 +288,9 @@ class Genvis(Vita):
             prev_clip_indices = out_clip_indices
             prev_aux_clip_indices = aux_clip_indices_list
         
-        labels = torch.zeros(B, cQ).to(self.device)
+        labels = torch.arange(B, B + cQ*B).reshape(B, cQ).to(self.device)
         for i, ind_set in enumerate(positive_indices):
-            labels[i][list(ind_set)] = 1
+            labels[i][list(ind_set)] = i
 
         last_hidden_state = nn.AdaptiveAvgPool2d((1,1))(h.reshape(cQ, B, *h.shape[-3:])).reshape(cQ, B, -1) # cQ, B, flattened feature_shape
         motion_roi = self.motion2text(last_hidden_state) # cQ, B, C
@@ -305,7 +305,8 @@ class Genvis(Vita):
         overall_motion = overall_motion.flatten(0,1) # cQ*B, C
         cls_token = cls_token[None].repeat_interleave(cQ, dim=0).flatten(0,1) # cQ*B, C
         features = torch.stack([overall_motion, cls_token], dim=1) # cQ*B, 2, C
-        labels = labels.permute(1,0).flatten()
+        labels = labels.permute(1,0).flatten() # cQ*B
+        
         
         grounding_loss = self.grounding_criterion(features, labels)
         
@@ -549,17 +550,19 @@ class Genvis(Vita):
         
         sim = F.cosine_similarity(overall_motion, cls_token, dim=-1).permute(1,0) # B, cQ
         
+        
         stacked_mask_embed = torch.stack(clip_mask_embed).permute(2,0,1,3) # nC, B(1), cQ, C -> cQ, nC, B(1), C
         
-        where = sim > 0.
+        where = sim > 0.5
         indices = where.nonzero(as_tuple=False)[:,1]
         
         # memory explodes when all indices are selected
-        if indices.numel() > 5:
-            indices = sim.topk(5)[1].flatten()
+        if indices.numel() > 3:
+            indices = sim.topk(3)[1].flatten()
         elif indices.numel == 0:
             indices = sim.topk(1)[1].flatten()
-        indices = sim.topk(1)[1].flatten()
+            
+        # indices = sim.topk(1)[1].flatten()
         # indices = sim.argmax()
         selected_mask_embed = stacked_mask_embed[indices] # qnum, nC, B(1), C
         # selected_mask_embed = stacked_mask_embed.permute(2,0,1,3)[indices].unsqueeze(0)
@@ -719,6 +722,7 @@ class SupConLoss(nn.Module):
             if labels.shape[0] != batch_size:
                 raise ValueError('Num of labels does not match num of features')
             mask = torch.eq(labels, labels.T).float().to(device)
+            
         else:
             mask = mask.float().to(device)
 
