@@ -66,6 +66,12 @@ class Genvis(Vita):
                                             ),
                                         nn.LayerNorm(mask2former_hidden_dim)
                                         )
+        self.motion_proj = MLP(
+            input_dim=xdecoder_hidden_dim*2,
+            hidden_dim=xdecoder_hidden_dim,
+            output_dim=xdecoder_hidden_dim,
+            num_layers=3
+        )
 
         self.convlstm = ConvLSTMCell(input_dim=96 * roi_feature_level, hidden_dim=mask2former_hidden_dim, kernel_size=(3,3), bias=True) # TODO hidden dim configurable
         self.roi_feature_shape = (14,14)
@@ -199,7 +205,7 @@ class Genvis(Vita):
 
             extra = {}
             texts = []
-            class_embeddings = []
+            cls_token = []
             for video in batched_inputs:
                 sentence = video["expressions"]
                 gtext = self.xdecoder.model.sem_seg_head.predictor.lang_encoder.get_text_token_embeddings([sentence], name='grounding', token=False, norm=False)
@@ -207,9 +213,9 @@ class Genvis(Vita):
                 tokens = gtext['tokens']
                 query_emb = token_emb[tokens['attention_mask'].bool()]
                 texts.append(query_emb)
-                class_embeddings.append(gtext['class_emb'])
+                cls_token.append(gtext['class_emb'])
             grounding_tokens = nn.utils.rnn.pad_sequence(texts)
-            class_embeddings = torch.cat(class_embeddings, dim=0)
+            cls_token = torch.cat(cls_token, dim=0)
             extra['grounding_tokens'] = grounding_tokens.repeat_interleave(self.len_clip_window, dim=1)
 
             frame_targets_per_clip = frame_targets[c_i]
@@ -276,33 +282,35 @@ class Genvis(Vita):
             # update memory
             pre_memory["k"].append(vita_outputs["pre_memory"]["k"])
             pre_memory["v"].append(vita_outputs["pre_memory"]["v"])
-            # pre_memory["motion"].append(vita_outputs["pre_memory"]["motion"])
+            pre_memory["motion"].append(vita_outputs["pre_memory"]["motion"])
             
             # update clip indices
             prev_clip_indices = out_clip_indices
             prev_aux_clip_indices = aux_clip_indices_list
         
-
-        last_hidden_state = nn.AdaptiveAvgPool2d((1,1))(h.reshape(cQ, B, *h.shape[-3:])).reshape(cQ, B, -1) # cQ, B, flattened feature_shape
-        motion_emb = self.motion2text(last_hidden_state) # cQ, B, C
-        # motion_emb = self.motion2text(h.reshape(cQ, B, h.shape[-3], feature_shape[0]*feature_shape[1]))
-
-        # sim = F.cosine_similarity(motion_emb, class_embeddings, dim=-1).permute(1,0) # B, cQ
-        # labels = torch.zeros_like(sim)
         labels = torch.zeros(B, cQ).to(self.device)
         for i, ind_set in enumerate(positive_indices):
             labels[i][list(ind_set)] = 1
+
+        last_hidden_state = nn.AdaptiveAvgPool2d((1,1))(h.reshape(cQ, B, *h.shape[-3:])).reshape(cQ, B, -1) # cQ, B, flattened feature_shape
+        motion_roi = self.motion2text(last_hidden_state) # cQ, B, C
+        motion_query = torch.cat(pre_memory['motion']).mean(dim=(0,1)).permute(1,0,2) # cQ, B, C 
+        # motion_roi = self.motion2text(h.reshape(cQ, B, h.shape[-3], feature_shape[0]*feature_shape[1]))
+        overall_motion = self.motion_proj(torch.cat([motion_roi, motion_query], dim=-1)) # cQ, B, 2C -> cQ, B, C
         
+        # overall_motion : cQ, B, C
+        # cls_token : B, C
+        # labels : B, cQ
         
-        loss_batchsum = torch.zeros(1).to(self.device)
-        motions = torch.unbind(motion_emb, dim=1)
-        # sentences = torch.unbind(class_embeddings, dim=0)
-        for m,s,l in zip(motions, class_embeddings, labels):
-            features = torch.stack([m, s[None].repeat_interleave(cQ, dim=0)], dim=1)
-            loss_batchsum += self.grounding_criterion(features, l)
+        overall_motion = overall_motion.flatten(0,1) # cQ*B, C
+        cls_token = cls_token[None].repeat_interleave(cQ, dim=0).flatten(0,1) # cQ*B, C
+        features = torch.stack([overall_motion, cls_token], dim=1) # cQ*B, 2, C
+        labels = labels.permute(1,0).flatten()
+        
+        grounding_loss = self.grounding_criterion(features, labels)
         
         # pos_weight =  ((B*cQ - labels.sum()) / labels.sum()).clamp(max=5)
-        grounding_loss_dict = {"loss_grounding" : loss_batchsum/B}
+        grounding_loss_dict = {"loss_grounding" : grounding_loss}
         grounding_loss_dict_keys = list(grounding_loss_dict.keys())
         
         for k in grounding_loss_dict_keys:
@@ -353,8 +361,6 @@ class Genvis(Vita):
                                         output_size=self.roi_feature_shape,
                                         spatial_scale=(_H/H),
                                         )[non_zero_indices]
-        
-        
         
         
         _roi_features = torchvision.ops.roi_align(
@@ -467,7 +473,7 @@ class Genvis(Vita):
         num_frames = len(batched_inputs["image"])
         to_store = self.device if num_frames <= 72 else "cpu"
         
-        pre_memory = {"k": [], "v": []}
+        pre_memory = {"k": [], "v": [], "motion": []}
 
         output_q = self.vita_module.query_feat.weight.unsqueeze(1).repeat(1, 1, 1) # cQ, LB, C, note L=1 B=1
         cQ, LB, C = output_q.shape
@@ -485,7 +491,7 @@ class Genvis(Vita):
             
             extra = {}
             texts = []
-            class_embeddings = []
+            cls_token = []
             # for video in batched_inputs:
             sentence = batched_inputs["expressions"]
             gtext = self.xdecoder.model.sem_seg_head.predictor.lang_encoder.get_text_token_embeddings([sentence], name='grounding', token=False, norm=False)
@@ -493,10 +499,10 @@ class Genvis(Vita):
             tokens = gtext['tokens']
             query_emb = token_emb[tokens['attention_mask'].bool()]
             texts.append(query_emb)
-            class_embeddings.append(gtext['class_emb'])
+            cls_token.append(gtext['class_emb'])
             
             grounding_tokens = nn.utils.rnn.pad_sequence(texts)
-            class_embeddings = torch.cat(class_embeddings, dim=0)
+            cls_token = torch.cat(cls_token, dim=0)
             extra['grounding_tokens'] = grounding_tokens.repeat_interleave(T, dim=1)
 
             with torch.no_grad():
@@ -523,6 +529,7 @@ class Genvis(Vita):
             # update memory
             pre_memory["k"].append(vita_outputs["pre_memory"]["k"])
             pre_memory["v"].append(vita_outputs["pre_memory"]["v"])
+            pre_memory["motion"].append(vita_outputs["pre_memory"]["motion"])
             
             del vita_outputs
 
@@ -535,8 +542,12 @@ class Genvis(Vita):
         # del outputs, batched_inputs
         
         last_hidden_state = nn.AdaptiveAvgPool2d((1,1))(h.reshape(cQ, 1, *h.shape[-3:])).reshape(cQ, 1, -1) # cQ, B, flattened feature_shape
-        motion_emb = self.motion2text(last_hidden_state) # cQ, B, C
-        sim = F.cosine_similarity(motion_emb, class_embeddings, dim=-1).permute(1,0) # B, cQ
+        motion_roi = self.motion2text(last_hidden_state) # cQ, B, C
+        motion_query = torch.cat(pre_memory['motion']).mean(dim=(0,1)).permute(1,0,2) # cQ, B, C 
+        # motion_roi = self.motion2text(h.reshape(cQ, B, h.shape[-3], feature_shape[0]*feature_shape[1]))
+        overall_motion = self.motion_proj(torch.cat([motion_roi, motion_query], dim=-1)) # cQ, B, 2C -> cQ, B, C
+        
+        sim = F.cosine_similarity(overall_motion, cls_token, dim=-1).permute(1,0) # B, cQ
         
         stacked_mask_embed = torch.stack(clip_mask_embed).permute(2,0,1,3) # nC, B(1), cQ, C -> cQ, nC, B(1), C
         
