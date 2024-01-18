@@ -96,7 +96,8 @@ class MeViSEvaluator(DatasetEvaluator):
         self._predictions = []
         self._Js = []
         self._Fs = []
-
+        self._Jmax = []
+        
     def process(self, inputs, outputs):
         """
         Args:
@@ -119,9 +120,8 @@ class MeViSEvaluator(DatasetEvaluator):
             os.makedirs(video_path, exist_ok=True)
             for i, m in enumerate(pred_masks.cpu().numpy().astype(np.float32)):
                 cv2.imwrite(os.path.join(video_path, f'{str(i).zfill(5)}.png'), m * 255)
-            
         else:
-            target_masks = torch.cat(inputs[0]['gt_masks_merge'])[None].to(pred_masks) # 1, T, H, W
+            target_masks = torch.cat(inputs[0]['gt_masks_merge'])[None].to(pred_masks.device) # 1, T, H, W
             target_masks = retry_if_cuda_oom(F.interpolate)(
                 target_masks.to(dtype=torch.float16),
                 size=(H,W),
@@ -131,11 +131,30 @@ class MeViSEvaluator(DatasetEvaluator):
             # reduce batch
             target_masks = target_masks.squeeze(0) 
             
+            
+            if outputs['all_pred_masks'] is not None:
+                all_pred_masks = outputs['all_pred_masks']
+                H_small, W_small = outputs['image_small_size']
+                cQ = all_pred_masks.shape[0]
+                instance_masks = torch.stack([inputs[0]['instances'][i].gt_masks.tensor for i in range(len(inputs[0]['instances']))], dim=1).to(pred_masks.device)
+                num_instances = instance_masks.shape[0]
+                instance_masks = retry_if_cuda_oom(F.interpolate)(
+                    instance_masks.to(dtype=torch.float16),
+                    size=(H_small,W_small),
+                    mode="nearest",
+                ) # 1, T, H, W
+            
+                j_per_query = self.db_eval_iou(instance_masks.unsqueeze(1).repeat_interleave(cQ, dim=1), all_pred_masks.unsqueeze(0).repeat_interleave(num_instances, dim=0)).mean(dim=2)
+                j_max = j_per_query.max(dim=1)[0]
+            
+                self._Jmax.append(j_max.mean().cpu())
+                
             j = self.db_eval_iou(target_masks, pred_masks)
             f = self.db_eval_boundary(target_masks, pred_masks)
             
+            # self._Js.append(j.mean().cpu())
             self._Js.append(j.mean().cpu())
-            self._Fs.append(f.mean())
+            self._Fs.append(f.mean().cpu())
         
         
 
@@ -186,7 +205,7 @@ class MeViSEvaluator(DatasetEvaluator):
             assert annotation.shape == void_pixels.shape
         if annotation.ndim == 3:
             n_frames = annotation.shape[0]
-            f_res = torch.zeros(n_frames)
+            f_res = torch.zeros(n_frames, device=segmentation.device)
             for frame_id in range(n_frames):
                 void_pixels_frame = None if void_pixels is None else void_pixels[frame_id, :, :, ]
                 f_res[frame_id] = self.f_measure(segmentation[frame_id, :, :, ], annotation[frame_id, :, :], void_pixels_frame, bound_th=bound_th)
@@ -343,9 +362,11 @@ class MeViSEvaluator(DatasetEvaluator):
             comm.synchronize()
             Js = comm.gather(self._Js, dst=0)
             Fs = comm.gather(self._Fs, dst=0)
+            Jmax = comm.gather(self._Jmax, dst=0)
             
             Js = list(itertools.chain(*Js))
             Fs = list(itertools.chain(*Fs))
+            Jmax = list(itertools.chain(*Jmax))
             
             # predictions = comm.gather(self._predictions, dst=0)
             # predictions = list(itertools.chain(*predictions))
@@ -355,6 +376,7 @@ class MeViSEvaluator(DatasetEvaluator):
         else:
             Js = self._Js
             Fs = self._Fs
+            Jmax = self._Jmax
             # predictions = self._predictions
 
         if len(Js) == 0:
@@ -370,6 +392,7 @@ class MeViSEvaluator(DatasetEvaluator):
         self._results = OrderedDict()
         
         results = {
+            "Jmax" : np.mean(Jmax),
             "J" : np.mean(Js),
             "F" : np.mean(Fs),
             "J&F" : (np.mean(Js) + np.mean(Fs))/2,

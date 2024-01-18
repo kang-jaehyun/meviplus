@@ -2,6 +2,7 @@
 output*
 instant_test_output
 inference_test_output
+visualization
 
 **/.DS_Store
 .DS_Store
@@ -26,6 +27,8 @@ wheels/
 
 # pytorch/python/numpy formats
 *.pth
+*.pt
+*.mp4
 *.pkl
 *.npy
 *.ts
