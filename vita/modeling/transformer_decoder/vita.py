@@ -221,6 +221,7 @@ class VITA(nn.Module):
         num_classes: int,
         clip_last_layer_num: bool,
         conv_dim: int,
+        xdec_dim: int,
         mask_dim: int,
         sim_use_clip: list,
         use_sim: bool,
@@ -308,7 +309,7 @@ class VITA(nn.Module):
             )
 
         self.vita_mask_features = Conv2d(
-            conv_dim,
+            xdec_dim,
             mask_dim,
             kernel_size=1,
             stride=1,
@@ -361,7 +362,7 @@ class VITA(nn.Module):
         ret["num_classes"] = cfg.MODEL.SEM_SEG_HEAD.NUM_CLASSES
         ret["num_frames"] = cfg.INPUT.SAMPLING_FRAME_NUM
         ret["clip_last_layer_num"] = cfg.MODEL.VITA.LAST_LAYER_NUM
-
+        ret['xdec_dim'] = cfg.XDECODER.MODEL.ENCODER.MASK_DIM
         ret["conv_dim"] = cfg.MODEL.SEM_SEG_HEAD.CONVS_DIM
         ret["mask_dim"] = cfg.MODEL.SEM_SEG_HEAD.MASK_DIM
         ret["sim_use_clip"] = cfg.MODEL.VITA.SIM_USE_CLIP

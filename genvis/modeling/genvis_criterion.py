@@ -277,7 +277,57 @@ class GenvisSetCriterion(nn.Module):
         loss_clip_sim = loss.sum() / (same_clip.sum() + 1e-6)
 
         return {"loss_genvis_sim": loss_clip_sim}
+    
+    def loss_fusion(self, pred_masks, video_targets, num_masks):
+        """
 
+        """
+        B,T,Hp,Wp = pred_masks.shape
+        
+        target_masks = []
+        for t in (video_targets):
+            target_masks.append(t['merged_masks'])
+        target_masks = torch.cat(target_masks) # B*cN*cT, Ht, Wt
+        BcNcT, Ht, Wt = target_masks.shape
+        
+        pred_masks = pred_masks.reshape(B*T, 1, Hp, Wp)
+        target_masks = target_masks.reshape(BcNcT, 1, Ht, Wt).to(dtype=torch.float16)
+
+        with torch.no_grad():
+            # sample point_coords
+            point_coords = get_uncertain_point_coords_with_randomness(
+                pred_masks,
+                lambda logits: calculate_uncertainty(logits),
+                self.num_points,
+                self.oversample_ratio,
+                self.importance_sample_ratio,
+            )
+            # get gt labels
+            point_labels = point_sample(
+                target_masks,
+                point_coords,
+                align_corners=False,
+            ).squeeze(1)
+
+        point_logits = point_sample(
+            pred_masks,
+            point_coords,
+            align_corners=False,
+        ).squeeze(1)
+        
+        
+        point_logits = point_logits.view(B, T * self.num_points)
+        point_labels = point_labels.view(B, T * self.num_points)
+        
+        losses = {
+            "loss_fusion_mask": sigmoid_ce_loss_jit(point_logits, point_labels, num_masks),
+            "loss_fusion_dice": dice_loss_jit(point_logits, point_labels, num_masks),
+        }
+
+        del pred_masks
+        del target_masks
+        return losses
+    
     def _get_src_permutation_idx(self, indices):
         # permute predictions following indices
         batch_idx = torch.cat([torch.full_like(src, i) for i, (src, _) in enumerate(indices)])

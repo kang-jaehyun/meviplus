@@ -8,7 +8,7 @@ MODEL:
     IGNORE_VALUE: 255
     NUM_CLASSES: 1
     LOSS_WEIGHT: 1.0
-    CONVS_DIM: 512
+    CONVS_DIM: 256
     MASK_DIM: 256
     NORM: "GN"
     # pixel decoder
@@ -46,8 +46,8 @@ MODEL:
       OBJECT_MASK_THRESHOLD: 0.8
   VITA:
     ENC_WINDOW_SIZE: 6
-    SIM_WEIGHT: 0.5
-    HIDDEN_DIM: 512
+    SIM_WEIGHT: 0.0
+    HIDDEN_DIM: 256
 DATASETS:
   DATASET_RATIO: [1.0, 0.75]
   TRAIN: ("mevis_train",)

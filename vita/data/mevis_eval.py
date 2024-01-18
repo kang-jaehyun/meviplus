@@ -112,9 +112,6 @@ class MeViSEvaluator(DatasetEvaluator):
         pred_masks = outputs["pred_masks"] # 1, T, H, W
         _, T, H, W = pred_masks.shape
         pred_masks = pred_masks.squeeze(0)
-        all_pred_masks = outputs['all_pred_masks']
-        H_small, W_small = outputs['image_small_size']
-        cQ = all_pred_masks.shape[0]
         
         if inputs[0]['split'] == 'test':
             video_id = inputs[0]['video_name']
@@ -130,22 +127,27 @@ class MeViSEvaluator(DatasetEvaluator):
                 size=(H,W),
                 mode="nearest",
             ) # 1, T, H, W
-            instance_masks = torch.stack([inputs[0]['instances'][i].gt_masks.tensor for i in range(len(inputs[0]['instances']))], dim=1).to(pred_masks.device)
-            num_instances = instance_masks.shape[0]
-            instance_masks = retry_if_cuda_oom(F.interpolate)(
-                instance_masks.to(dtype=torch.float16),
-                size=(H_small,W_small),
-                mode="nearest",
-            ) # 1, T, H, W
-            
-
-            
             
             # reduce batch
             target_masks = target_masks.squeeze(0) 
             
-            j_per_query = self.db_eval_iou(instance_masks.unsqueeze(1).repeat_interleave(cQ, dim=1), all_pred_masks.unsqueeze(0).repeat_interleave(num_instances, dim=0)).mean(dim=2)
-            j_max = j_per_query.max(dim=1)[0]
+            
+            if outputs['all_pred_masks'] is not None:
+                all_pred_masks = outputs['all_pred_masks']
+                H_small, W_small = outputs['image_small_size']
+                cQ = all_pred_masks.shape[0]
+                instance_masks = torch.stack([inputs[0]['instances'][i].gt_masks.tensor for i in range(len(inputs[0]['instances']))], dim=1).to(pred_masks.device)
+                num_instances = instance_masks.shape[0]
+                instance_masks = retry_if_cuda_oom(F.interpolate)(
+                    instance_masks.to(dtype=torch.float16),
+                    size=(H_small,W_small),
+                    mode="nearest",
+                ) # 1, T, H, W
+                self._Jmax.append(j_max.mean().cpu())
+            
+            
+                j_per_query = self.db_eval_iou(instance_masks.unsqueeze(1).repeat_interleave(cQ, dim=1), all_pred_masks.unsqueeze(0).repeat_interleave(num_instances, dim=0)).mean(dim=2)
+                j_max = j_per_query.max(dim=1)[0]
             
             j = self.db_eval_iou(target_masks, pred_masks)
             f = self.db_eval_boundary(target_masks, pred_masks)
@@ -153,7 +155,6 @@ class MeViSEvaluator(DatasetEvaluator):
             # self._Js.append(j.mean().cpu())
             self._Js.append(j.mean().cpu())
             self._Fs.append(f.mean().cpu())
-            self._Jmax.append(j_max.mean().cpu())
         
         
 
