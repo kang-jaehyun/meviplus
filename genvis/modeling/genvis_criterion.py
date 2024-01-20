@@ -369,7 +369,7 @@ class GenvisSetCriterion(nn.Module):
         outputs_without_aux = {k: v for k, v in outputs.items() if k != "aux_outputs"}
 
         # Retrieve the matching between the outputs of the last layer and the targets
-        new_clip_indices = self.matcher(outputs_without_aux, clip_targets, prev_clip_indices)
+        new_clip_indices, iou = self.matcher(outputs_without_aux, clip_targets, prev_clip_indices)
         L = len(new_clip_indices)
 
         if prev_clip_indices is None: # first clip
@@ -411,9 +411,9 @@ class GenvisSetCriterion(nn.Module):
             aux_clip_indices_list = []
             for i, aux_outputs in enumerate(outputs["aux_outputs"]):
                 if prev_aux_clip_indices is None:
-                    new_aux_clip_indices = self.matcher(aux_outputs, clip_targets)
+                    new_aux_clip_indices, _ = self.matcher(aux_outputs, clip_targets)
                 else:
-                    new_aux_clip_indices = self.matcher(aux_outputs, clip_targets, prev_aux_clip_indices[i])
+                    new_aux_clip_indices, _ = self.matcher(aux_outputs, clip_targets, prev_aux_clip_indices[i])
                 if prev_aux_clip_indices is None:
                     aux_clip_indices = new_aux_clip_indices
                 else:
@@ -441,7 +441,7 @@ class GenvisSetCriterion(nn.Module):
         else: # TODO: make clear
             aux_clip_indices_list = None
 
-        return losses, clip_indices, aux_clip_indices_list
+        return losses, clip_indices, aux_clip_indices_list, iou
 
     def __repr__(self):
         head = "Criterion " + self.__class__.__name__

@@ -108,6 +108,10 @@ class GenvisHungarianMatcher(nn.Module):
         targets = targets * L
 
         indices = []
+        ious = []
+        
+        eps = 1e-6
+        
         for b in range(L*B):
             new_inst = targets[b]["new_inst"]
             b_out_prob = out_prob[b]
@@ -137,7 +141,15 @@ class GenvisHungarianMatcher(nn.Module):
                 point_coords.repeat(b_out_mask.shape[0], 1, 1),
                 align_corners=False,
             ).flatten(1)
-
+            
+            if b in range(L*B - B, L*B):
+                if tgt_mask.size(0) == 0:
+                    iou = torch.zeros(cQ, device=b_out_mask.device)
+                    ious.append(iou)
+                else:
+                    iou = torch.logical_and(b_out_mask.unsqueeze(0) > 0, tgt_mask.unsqueeze(1)).sum(dim=2) / (torch.logical_or(b_out_mask.unsqueeze(0) > 0, tgt_mask.unsqueeze(1)).sum(dim=2) + eps) # target_num, cQ
+                    ious.append(iou.max(dim=0)[0]) # cQ
+            
             with autocast(enabled=False):
                 b_out_mask = b_out_mask.float()
                 tgt_mask = tgt_mask.float()
@@ -171,7 +183,7 @@ class GenvisHungarianMatcher(nn.Module):
             (torch.as_tensor(i, dtype=torch.int64, device=out_prob.device), 
              torch.as_tensor(j, dtype=torch.int64, device=out_prob.device))
             for i, j in indices
-        ]
+        ], torch.stack(ious, dim=0)
 
     @torch.no_grad()
     def forward(self, outputs, targets, prev_clip_indices=None):

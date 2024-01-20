@@ -143,12 +143,13 @@ class MeViSEvaluator(DatasetEvaluator):
                     size=(H_small,W_small),
                     mode="nearest",
                 ) # 1, T, H, W
-                self._Jmax.append(j_max.mean().cpu())
             
             
                 j_per_query = self.db_eval_iou(instance_masks.unsqueeze(1).repeat_interleave(cQ, dim=1), all_pred_masks.unsqueeze(0).repeat_interleave(num_instances, dim=0)).mean(dim=2)
                 j_max = j_per_query.max(dim=1)[0]
             
+                self._Jmax.append(j_max.mean().cpu())
+                
             j = self.db_eval_iou(target_masks, pred_masks)
             f = self.db_eval_boundary(target_masks, pred_masks)
             
