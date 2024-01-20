@@ -653,10 +653,10 @@ class ScoreDecoder(nn.Module):
             num_layers=3,
         )
         
-        self.iou_token = nn.Embedding(1, hidden_dim) 
+        # self.iou_token = nn.Embedding(1, hidden_dim) 
         
-        cQ = 20
-        self.query_pos = nn.Embedding(cQ, hidden_dim)
+        # cQ = 20
+        # self.query_pos = nn.Embedding(cQ, hidden_dim)
         
         pre_norm = False
         if enc_layers > 0:
