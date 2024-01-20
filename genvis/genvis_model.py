@@ -67,7 +67,7 @@ class Genvis(Vita):
         self.iou_predictor_head = MLP(
                                     input_dim=mask2former_hidden_dim,
                                     hidden_dim=mask2former_hidden_dim,
-                                    output_dim=20, # TODO
+                                    output_dim=1, # TODO
                                     num_layers=3
                                     )
 
@@ -96,8 +96,6 @@ class Genvis(Vita):
         class_weight = cfg.MODEL.MASK_FORMER.CLASS_WEIGHT
         dice_weight  = cfg.MODEL.MASK_FORMER.DICE_WEIGHT
         mask_weight  = cfg.MODEL.MASK_FORMER.MASK_WEIGHT
-        fusion_mask_weight = cfg.MODEL.GENVIS.FUSION_MASK_WEIGHT
-        fusion_dice_weight = cfg.MODEL.GENVIS.FUSION_DICE_WEIGHT
         
         sim_weight   = cfg.MODEL.VITA.SIM_WEIGHT
         grounding_weight = cfg.MODEL.GENVIS.GROUNDING_WEIGHT
@@ -329,150 +327,7 @@ class Genvis(Vita):
         
         video_iou = torch.stack(ious_list, dim=0).mean(dim=0)
         output = self.score_decoder(clip_queries, cls_token)
-        scores = self.iou_predictor_head(output[-1])
-        
-        fusion_loss_dict = {"loss_grounding": F.mse_loss(scores, video_iou)}
-        for k in fusion_loss_dict.keys():
-            if k in genvis_weight_dict:
-                fusion_loss_dict[k] *= genvis_weight_dict[k]
-                
-        losses.update(fusion_loss_dict)
-        
-        return losses
-    
-    def _train_model(self, batched_inputs):
-        num_frames = len(batched_inputs[0]['image'])
-        pre_memory = {"k": [], "v": []}
-        num_clips = num_frames // self.len_clip_window
-        
-        assert num_frames % self.len_clip_window == 0, f"num_frames: {num_frames}, len_clip_window: {self.len_clip_window}"
-        
-        B = len(batched_inputs)
-        L = 3 # TODO : configurable
-        cQ = 20 # TODO : configurable
-        T = num_frames
-        
-        images = []
-        for video in batched_inputs:
-            for frame in video["image"]:
-                images.append(frame.to(self.device))
-        images = [(x - self.pixel_mean) / self.pixel_std for x in images]
-        images = ImageList.from_tensors(images, self.size_divisibility)
-
-        extra = {}
-        texts = []
-        cls_token = []
-        for video in batched_inputs:
-            sentence = video["expressions"]
-            gtext = self.xdecoder.model.sem_seg_head.predictor.lang_encoder.get_text_token_embeddings([sentence], name='grounding', token=False, norm=False)
-            token_emb = gtext['token_emb']
-            tokens = gtext['tokens']
-            query_emb = token_emb[tokens['attention_mask'].bool()]
-            texts.append(query_emb)
-            cls_token.append(gtext['class_emb'])
-        grounding_tokens = nn.utils.rnn.pad_sequence(texts)
-        cls_token = torch.cat(cls_token, dim=0)
-        extra['grounding_tokens'] = grounding_tokens.repeat_interleave(T, dim=1)
-        
-        with torch.no_grad():
-            features = self.xdecoder.model.backbone(images.tensor)
-            _, frame_queries, mask_features_all = self.xdecoder.model.sem_seg_head(features, extra=extra, task='grounding_eval')
-        
-        frame_queries = self.query_proj(frame_queries)
-        
-        BT = len(images)
-        cT = self.len_clip_window
-        B = BT // T
-
-        L, BT, fQ, C = frame_queries.shape
-        
-        mask_features_all = self.vita_module.vita_mask_features(mask_features_all)
-        mask_features_all = mask_features_all.view(B, T, *mask_features_all.shape[-3:])
-
-        # mask classification target
-        frame_targets, video_targets_full = self.prepare_targets(batched_inputs, images)
-                
-        # bipartite matching-based loss
-        assert self.freeze_detector, "Detector should be frozen"
-        losses = dict()
-        
-        # if self.freeze_detector:
-        #     losses = dict()
-        
-        # mask classification target
-        frame_targets = self.split_frame_targets(frame_targets, B)
-        video_targets = self.split_video_targets(video_targets_full)
-        # fg_indices    = self.split_fg_indices(fg_indices, B)
-
-        frame_queries = frame_queries.reshape(L, B, T, fQ, C)
-        frame_queries = frame_queries.split(self.len_clip_window, dim=2)
-        mask_features = mask_features_all.split(self.len_clip_window, dim=1)
-        
-        prev_clip_indices = None
-        prev_aux_clip_indices = None
-        output_q = self.vita_module.query_feat.weight.unsqueeze(1).repeat(1, L*B, 1) # cQ, LB, C
-        cQ, LB, C = output_q.shape
-        
-        clip_queries_list = []
-        ious_list = []
-        for c_i in range(num_clips):
-            clip_targets  = video_targets[c_i]
-            frame_targets_per_clip = frame_targets[c_i]
-            frame_queries_per_clip = frame_queries[c_i]
-            mask_features_per_clip = mask_features[c_i]
-            
-            vita_outputs, output_q = self.vita_module(frame_queries_per_clip.flatten(1,2), pre_memory, output_q)
-            clip_queries_list.append(output_q.reshape(cQ, L, B, C)[:, -1:, :, :])
-            vita_outputs["pred_masks"] = torch.einsum("lbqc,btchw->lbqthw", vita_outputs["pred_mask_embed"], mask_features_per_clip)
-            
-            for out in vita_outputs["aux_outputs"]:
-                out["pred_masks"] = torch.einsum("lbqc,btchw->lbqthw", out["pred_mask_embed"], mask_features_per_clip)
-
-            
-            genvis_loss_dict, out_clip_indices, aux_clip_indices_list, iou = self.genvis_criterion(
-                                                                                outputs=vita_outputs,
-                                                                                clip_targets=clip_targets,
-                                                                                frame_targets=frame_targets_per_clip, 
-                                                                                # frame_indices=fg_indices, 
-                                                                                prev_clip_indices=prev_clip_indices, 
-                                                                                prev_aux_clip_indices=prev_aux_clip_indices,
-                                                                            )
-            ious_list.append(iou)
-            
-            genvis_weight_dict = self.genvis_criterion.weight_dict
-            
-            loss_dict_keys = list(genvis_loss_dict.keys())
-            for k in loss_dict_keys:
-                if k in genvis_weight_dict:
-                    genvis_loss = genvis_loss_dict.pop(k)
-                    genvis_loss_dict[f"{k}_clip{c_i}"] = genvis_loss * genvis_weight_dict[k]
-            losses.update(genvis_loss_dict)
-            
-            # update memory
-            pre_memory["k"].append(vita_outputs["pre_memory"]["k"])
-            pre_memory["v"].append(vita_outputs["pre_memory"]["v"])
-
-            # update clip indices
-            prev_clip_indices = out_clip_indices
-            prev_aux_clip_indices = aux_clip_indices_list
-
-            # for i, (s_i, t_i) in enumerate(out_clip_indices[-B:]):
-            #         for s in s_i:
-            #             positive_indices[i].add(s.item())
-
-            # roi_features, box_rois = self.get_roi_features(vita_outputs, features) # cQ*B, T, C, H, W
-            
-            # for f in range(self.len_clip_window):
-            #     h, c = self.convlstm(roi_features[:, f], (h, c), box_rois[:, f])
-        
-        
-        clip_queries = torch.cat(clip_queries_list, dim=1)
-        cQ, cN, B, C = clip_queries.shape
-        clip_queries = clip_queries.permute(1,0,2,3) # cN, cQ, B, C
-        
-        video_iou = torch.stack(ious_list, dim=0).mean(dim=0)
-        output = self.score_decoder(clip_queries, cls_token)
-        scores = self.iou_predictor_head(output[-1])
+        scores = self.iou_predictor_head(output).squeeze(-1).permute(1,0)
         
         fusion_loss_dict = {"loss_grounding": F.mse_loss(scores, video_iou)}
         for k in fusion_loss_dict.keys():
@@ -702,7 +557,7 @@ class Genvis(Vita):
         cQ, cN, B, C = clip_queries.shape
         clip_queries = clip_queries.permute(1,0,2,3) # cN, cQ, B, C
         output = self.score_decoder(clip_queries, cls_token)
-        iou_pred = self.iou_predictor_head(output[-1])
+        iou_pred = self.iou_predictor_head(output).squeeze(-1).permute(1,0)
         stacked_mask_embed = torch.stack(clip_mask_embed).permute(2,0,1,3) # nC, B(1), cQ, C -> cQ, nC, B(1), C
         
         # where = sim > 0.5
@@ -877,21 +732,21 @@ class ScoreDecoder(nn.Module):
         clip_q = self.encode_clip_query(clip_q.reshape(cN, cQ*B, C)).reshape(cN*cQ, B, C) # cNcQ, B, C
         src = self.src_embed(clip_q) # cNcQ, B, C
         cls_token = self.text_embed(cls_token) # B, C
-        output = torch.cat([cls_token[None].repeat_interleave(cQ, dim=0) + self.query_pos.weight.unsqueeze(1), self.iou_token.weight[None].repeat(1,B,1)], dim=0) # cQ, B, C
-        output_pos = output
+        output = cls_token[None].repeat_interleave(cQ, dim=0) # cQ, B, C
+        # output_pos = output
         # each Query attends to each embeddings
-        mask = (~torch.cat([torch.eye(cQ), torch.ones(1, cQ)], dim=0).to(dtype=torch.bool, device=cls_token.device)).repeat_interleave(cN, dim=1) # cN should be number of embeddings releated to each Q
+        mask = (~torch.eye(cQ).to(dtype=torch.bool, device=cls_token.device)).repeat_interleave(cN, dim=1) # cN should be number of embeddings releated to each Q
         
         # decoder_outputs = []
         for i in range(self.num_layers):
-            output += output_pos
+            # output += output_pos
             output = self.transformer_self_attention_layers[i](
                 output, tgt_mask=None,
                 tgt_key_padding_mask=None,
                 query_pos=None,
             )
             
-            output += output_pos
+            # output += output_pos
             # attention: cross-attention first
             output = self.transformer_cross_attention_layers[i](
                 output, src,
