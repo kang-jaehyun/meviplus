@@ -96,6 +96,8 @@ class MeViSEvaluator(DatasetEvaluator):
         self._predictions = []
         self._Js = []
         self._Fs = []
+        self._Precisions = []
+        self._Recalls = []
         self._Jmax = []
         
     def process(self, inputs, outputs):
@@ -145,22 +147,23 @@ class MeViSEvaluator(DatasetEvaluator):
                 ) # 1, T, H, W
             
             
-                j_per_query = self.db_eval_iou(instance_masks.unsqueeze(1).repeat_interleave(cQ, dim=1), all_pred_masks.unsqueeze(0).repeat_interleave(num_instances, dim=0)).mean(dim=2)
+                j_per_query = self.db_eval_iou(instance_masks.unsqueeze(1).repeat_interleave(cQ, dim=1), all_pred_masks.unsqueeze(0).repeat_interleave(num_instances, dim=0), only_j=True).mean(dim=2)
                 j_max = j_per_query.max(dim=1)[0]
             
                 self._Jmax.append(j_max.mean().cpu())
                 
-            j = self.db_eval_iou(target_masks, pred_masks)
+            j, precision, recall = self.db_eval_iou(target_masks, pred_masks, only_j=False)
             f = self.db_eval_boundary(target_masks, pred_masks)
             
             # self._Js.append(j.mean().cpu())
             self._Js.append(j.mean().cpu())
             self._Fs.append(f.mean().cpu())
-        
+            self._Precisions.append(precision.mean().cpu())
+            self._Recalls.append(recall.mean().cpu())
         
 
     
-    def db_eval_iou(self, annotation, segmentation, void_pixels=None):
+    def db_eval_iou(self, annotation, segmentation, void_pixels=None, only_j=True):
         """ Compute region similarity as the Jaccard Index.
         Arguments:
             annotation   (torch.tensor): binary annotation   map.
@@ -188,6 +191,10 @@ class MeViSEvaluator(DatasetEvaluator):
         inters = torch.sum((segmentation & annotation) & torch.logical_not(void_pixels), axis=(-2, -1)) # B(1), T
         union = torch.sum((segmentation | annotation) & torch.logical_not(void_pixels), axis=(-2, -1)) # B(1), T
 
+        if not only_j:
+            precision = inters / torch.sum(segmentation & torch.logical_not(void_pixels), axis=(-2, -1))
+            recall = inters / torch.sum(annotation & torch.logical_not(void_pixels), axis=(-2, -1))
+        
         j = inters / union
         j[union == 0] = 1
         
@@ -196,7 +203,9 @@ class MeViSEvaluator(DatasetEvaluator):
         # else:
         #     j[np.isclose(union, 0)] = 1
         
-        return j
+        if only_j:
+            return j
+        return j, precision, recall
 
 
     def db_eval_boundary(self, annotation, segmentation, void_pixels=None, bound_th=0.008):
@@ -364,10 +373,16 @@ class MeViSEvaluator(DatasetEvaluator):
             Js = comm.gather(self._Js, dst=0)
             Fs = comm.gather(self._Fs, dst=0)
             Jmax = comm.gather(self._Jmax, dst=0)
+            Recall = comm.gather(self._Recalls, dst=0)
+            Precision = comm.gather(self._Precisions, dst=0)
+            
             
             Js = list(itertools.chain(*Js))
             Fs = list(itertools.chain(*Fs))
             Jmax = list(itertools.chain(*Jmax))
+            Recall = list(itertools.chain(*Recall))
+            Precision = list(itertools.chain(*Precision))
+            
             
             # predictions = comm.gather(self._predictions, dst=0)
             # predictions = list(itertools.chain(*predictions))
@@ -378,6 +393,8 @@ class MeViSEvaluator(DatasetEvaluator):
             Js = self._Js
             Fs = self._Fs
             Jmax = self._Jmax
+            Precision = self._Precisions
+            Recall = self._Recalls
             # predictions = self._predictions
 
         if len(Js) == 0:
@@ -393,10 +410,12 @@ class MeViSEvaluator(DatasetEvaluator):
         self._results = OrderedDict()
         
         results = {
-            "Jmax" : np.mean(Jmax),
-            "J" : np.mean(Js),
-            "F" : np.mean(Fs),
-            "J&F" : (np.mean(Js) + np.mean(Fs))/2,
+            "Jmax" : np.nanmean(Jmax),
+            "J" : np.nanmean(Js),
+            "F" : np.nanmean(Fs),
+            "J&F" : (np.nanmean(Js) + np.nanmean(Fs))/2,
+            "Precision" : np.nanmean(Precision),
+            "Recall" : np.nanmean(Recall),
         }
         
         self._results.update(results)
