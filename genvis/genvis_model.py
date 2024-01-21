@@ -733,20 +733,20 @@ class ScoreDecoder(nn.Module):
         src = self.src_embed(clip_q) # cNcQ, B, C
         cls_token = self.text_embed(cls_token) # B, C
         output = cls_token[None].repeat_interleave(cQ, dim=0) # cQ, B, C
-        # output_pos = output
+        output_pos = output
         # each Query attends to each embeddings
         mask = (~torch.eye(cQ).to(dtype=torch.bool, device=cls_token.device)).repeat_interleave(cN, dim=1) # cN should be number of embeddings releated to each Q
         
         # decoder_outputs = []
         for i in range(self.num_layers):
-            # output += output_pos
+            output += output_pos
             output = self.transformer_self_attention_layers[i](
                 output, tgt_mask=None,
                 tgt_key_padding_mask=None,
                 query_pos=None,
             )
             
-            # output += output_pos
+            output += output_pos
             # attention: cross-attention first
             output = self.transformer_cross_attention_layers[i](
                 output, src,
