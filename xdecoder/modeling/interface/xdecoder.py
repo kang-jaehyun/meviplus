@@ -315,7 +315,7 @@ class XDecoder(nn.Module):
                     predictions_class if self.mask_classification else None, predictions_mask, predictions_bbox, predictions_caption
                 )
             }
-            return out, frame_queries, mask_features
+            return out, frame_queries, mask_features, x
 
     def forward_captioning(self, x, mask_features, mask = None, target_queries = None, target_vlp = None, task='seg', extra={}):
         # x is a list of multi-scale feature
