@@ -212,7 +212,7 @@ class Genvis(Vita):
     
     def train_model(self, batched_inputs):
         num_frames = len(batched_inputs[0]['image'])
-        pre_memory = {"k": [], "v": []}
+        pre_memory = {"k": [], "v": [], "motion": []}
         num_clips = num_frames // self.len_clip_window
         
         assert num_frames % self.len_clip_window == 0, f"num_frames: {num_frames}, len_clip_window: {self.len_clip_window}"
@@ -340,7 +340,7 @@ class Genvis(Vita):
             # update memory
             pre_memory["k"].append(vita_outputs["pre_memory"]["k"])
             pre_memory["v"].append(vita_outputs["pre_memory"]["v"])
-            # pre_memory["motion"].append(vita_outputs["pre_memory"]["motion"])
+            pre_memory["motion"].append(vita_outputs["pre_memory"]["motion"])
             
             # update clip indices
             prev_clip_indices = out_clip_indices
@@ -363,14 +363,19 @@ class Genvis(Vita):
         object_feature = torch.cat([rois, boxes], dim=-1) # cQ, B, cNcT, C*2
         object_feature = object_feature.permute(2,0,1,3).reshape(num_clips*cT, cQ*B, -1) # cN*cT, cQ*B, C*2
 
+        motion_query = torch.cat(pre_memory['motion']).mean(dim=(0,1)).permute(1,0,2) # cQ, B, C
+        motion_query = motion_query[None].flatten(1,2) # 1, cQ*B, C
         
         lstm_output, (hn, cn) = self.lstm(object_feature, (self.initial_hidden.weight.unsqueeze(1).repeat_interleave(B*cQ, dim=1), self.initial_cell.weight.unsqueeze(1).repeat_interleave(B*cQ, dim=1)))
         
         # clip_queries = torch.cat(clip_query_list, dim=1)
         # cQ, cN, B, C = clip_queries.shape
         # clip_queries = clip_queries.permute(1,0,2,3) # cN, cQ, B, C
+        
+        final_features = torch.cat([motion_query, lstm_output], dim=0) # cN*cT+1, cQ*B, C
+        
         video_iou = torch.stack(iou_list, dim=0).mean(dim=0)
-        output = self.score_decoder(lstm_output.reshape(T,cQ, B, C), cls_token)
+        output = self.score_decoder(final_features.reshape(T+1,cQ, B, C), cls_token)
         scores = self.iou_predictor_head(output[-1])
         
         fusion_loss_dict = {"loss_grounding": F.mse_loss(scores, video_iou)}
@@ -581,6 +586,7 @@ class Genvis(Vita):
             # update memory
             pre_memory["k"].append(vita_outputs["pre_memory"]["k"])
             pre_memory["v"].append(vita_outputs["pre_memory"]["v"])
+            pre_memory["motion"].append(vita_outputs["pre_memory"]["motion"])
             
             del vita_outputs
 
@@ -599,12 +605,18 @@ class Genvis(Vita):
         object_feature = torch.cat([rois, boxes], dim=-1) # cQ, B, cNcT, C*2
         object_feature = object_feature.permute(2,0,1,3).reshape(num_frames, cQ*1, -1) # cN*cT, cQ*B, C*2
 
+        motion_query = torch.cat(pre_memory['motion']).mean(dim=(0,1)).permute(1,0,2) # cQ, B, C
+        motion_query = motion_query[None].flatten(1,2) # 1, cQ*B, C
+        
         lstm_output, (hn, cn) = self.lstm(object_feature, (self.initial_hidden.weight.unsqueeze(1).repeat_interleave(B*cQ, dim=1), self.initial_cell.weight.unsqueeze(1).repeat_interleave(B*cQ, dim=1)))
+        
+        final_features = torch.cat([motion_query, lstm_output], dim=0) # cN*cT+1, cQ*B, C
         
         # clip_queries = torch.cat(clip_query_list, dim=1)
         # cQ, cN, B, C = clip_queries.shape
         # clip_queries = clip_queries.permute(1,0,2,3) # cN, cQ, B, C
-        output = self.score_decoder(lstm_output.reshape(num_frames, cQ, B, C), cls_token)
+        
+        output = self.score_decoder(final_features.reshape(num_frames+1, cQ, B, C), cls_token)
         iou_pred = self.iou_predictor_head(output[-1])
         stacked_mask_embed = torch.stack(clip_mask_embed).permute(2,0,1,3) # nC, B(1), cQ, C -> cQ, nC, B(1), C
         

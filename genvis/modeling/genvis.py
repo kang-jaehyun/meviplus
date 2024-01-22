@@ -16,7 +16,7 @@ class GenVIS(VITA):
 
         self.num_frames = cfg.MODEL.GENVIS.LEN_CLIP_WINDOW
         hidden_dim = cfg.MODEL.VITA.HIDDEN_DIM
-        motion_dim = cfg.XDECODER.MODEL.ENCODER.MASK_DIM
+        motion_dim = cfg.MODEL.VITA.HIDDEN_DIM
 
         self.pre_memory_embed_k = nn.Linear(hidden_dim, hidden_dim)
         self.pre_memory_embed_v = nn.Linear(hidden_dim, hidden_dim)
@@ -24,7 +24,7 @@ class GenVIS(VITA):
         self.pre_query_embed_k = nn.Linear(hidden_dim, hidden_dim)
         self.pre_query_embed_v = nn.Linear(hidden_dim, hidden_dim)
 
-        # self.motion_embed = nn.Linear(hidden_dim, motion_dim)
+        self.motion_embed = nn.Linear(hidden_dim, motion_dim)
         
     def forward(self, frame_query, pre_memory, output):
         """
@@ -135,7 +135,7 @@ class GenVIS(VITA):
 
         pre_memory_k = self.pre_memory_embed_k(memory_input)[None] # 1, L, B, cQ, C
         pre_memory_v = self.pre_memory_embed_v(memory_input)[None] # 1, L, B, cQ, C
-        # memory_motion = self.motion_embed(memory_input)[None]      # 1, L, B, cQ, C
+        memory_motion = self.motion_embed(memory_input)[None]      # 1, L, B, cQ, C
         # memory_motion = self.motion_embed(memory_input.detach())[None]      # 1, L, B, cQ, C
         
         out = {
@@ -146,8 +146,8 @@ class GenVIS(VITA):
             'aux_outputs': self._set_aux_loss(
                 pred_cls, pred_mask_embed, pred_cq_embed, pred_fq_embed
             ),
-            # 'pre_memory': {"k": pre_memory_k, "v": pre_memory_v, "motion": memory_motion},
-            'pre_memory': {"k": pre_memory_k, "v": pre_memory_v},
+            'pre_memory': {"k": pre_memory_k, "v": pre_memory_v, "motion": memory_motion},
+            # 'pre_memory': {"k": pre_memory_k, "v": pre_memory_v},
         }
 
         return out, output
