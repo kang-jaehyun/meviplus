@@ -396,7 +396,10 @@ class Genvis(Vita):
         return corner_embedding
     
     def get_roi_embeds(self, outputs, multi_scale_features):
-        bmask = outputs['pred_masks'][-1] > 0
+        sig_mask = outputs['pred_masks'][-1].sigmoid()
+        objectness_logits = outputs['pred_logits'][-1].softmax(-1)[..., 0]
+        calibrated_mask = objectness_logits[..., None, None, None] * sig_mask
+        bmask = calibrated_mask > 0.25
         B, cQ, T, H, W = bmask.shape
         bmask = bmask.permute(1,0,2,3,4).flatten(0,2) # cQ*B*T, H, W
         bbox = torch.zeros(B*cQ*T, 4).to(bmask.device)
