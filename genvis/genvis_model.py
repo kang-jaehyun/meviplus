@@ -308,8 +308,7 @@ class Genvis(Vita):
             
             # if self.freeze_detector:
             # losses = dict()
-            output_q += cls_token_query.repeat(L,1)[None]
-            vita_outputs, output_q = self.vita_module(frame_queries, pre_memory, output_q)
+            vita_outputs, output_q = self.vita_module(frame_queries, pre_memory, output_q + cls_token_query.repeat(L,1)[None])
             vita_outputs["pred_masks"] = torch.einsum("lbqc,btchw->lbqthw", vita_outputs["pred_mask_embed"], _mask_features)
             
             
@@ -583,8 +582,7 @@ class Genvis(Vita):
 
             L, BT, fQ, C = frame_queries.shape
             
-            output_q += cls_token_query[None]
-            vita_outputs, output_q = self.vita_module(frame_queries, pre_memory, output_q)
+            vita_outputs, output_q = self.vita_module(frame_queries, pre_memory, output_q + cls_token_query[None])
             clip_mask_embed.append(vita_outputs["pred_mask_embed"].squeeze(1)) # squeeze batch
             clip_query_list.append(output_q)
             
