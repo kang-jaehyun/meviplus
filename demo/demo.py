@@ -123,7 +123,7 @@ if __name__ == "__main__":
 
     if args.input:
         if len(args.input) == 1:
-            args.input = glob.glob(os.path.expanduser(args.input[0]))
+            args.input = sorted(glob.glob(os.path.expanduser(args.input[0])))
             assert args.input, "The input path(s) was not found"
 
         vid_frames = []
