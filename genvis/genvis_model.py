@@ -65,6 +65,17 @@ class Genvis(Vita):
                                             ),
                                         nn.LayerNorm(mask2former_hidden_dim)
                                         )
+        
+        self.text_proj = nn.Sequential(
+                                        MLP(
+                                            input_dim=xdecoder_hidden_dim, 
+                                            hidden_dim=xdecoder_hidden_dim, 
+                                            output_dim=mask2former_hidden_dim,
+                                            num_layers=3
+                                            ),
+                                        nn.LayerNorm(mask2former_hidden_dim)
+                                        )
+        
         self.iou_predictor_head = MLP(
                                     input_dim=mask2former_hidden_dim,
                                     hidden_dim=mask2former_hidden_dim,
@@ -247,6 +258,20 @@ class Genvis(Vita):
         roi_list = []
         box_list = []
         
+        texts = []
+        cls_token = []
+        for video in batched_inputs:
+            sentence = video["expressions"]
+            gtext = self.xdecoder.model.sem_seg_head.predictor.lang_encoder.get_text_token_embeddings([sentence], name='grounding', token=False, norm=False)
+            token_emb = gtext['token_emb']
+            tokens = gtext['tokens']
+            query_emb = token_emb[tokens['attention_mask'].bool()]
+            texts.append(query_emb)
+            cls_token.append(gtext['class_emb'])
+        grounding_tokens = nn.utils.rnn.pad_sequence(texts)
+        cls_token = torch.cat(cls_token, dim=0)
+        cls_token_query = self.text_proj(cls_token)
+        
         for c_i in range(num_clips):
             images = []
             for video in batched_inputs:
@@ -256,18 +281,6 @@ class Genvis(Vita):
             images = ImageList.from_tensors(images, self.size_divisibility)
 
             extra = {}
-            texts = []
-            cls_token = []
-            for video in batched_inputs:
-                sentence = video["expressions"]
-                gtext = self.xdecoder.model.sem_seg_head.predictor.lang_encoder.get_text_token_embeddings([sentence], name='grounding', token=False, norm=False)
-                token_emb = gtext['token_emb']
-                tokens = gtext['tokens']
-                query_emb = token_emb[tokens['attention_mask'].bool()]
-                texts.append(query_emb)
-                cls_token.append(gtext['class_emb'])
-            grounding_tokens = nn.utils.rnn.pad_sequence(texts)
-            cls_token = torch.cat(cls_token, dim=0)
             extra['grounding_tokens'] = grounding_tokens.repeat_interleave(self.len_clip_window, dim=1)
 
             frame_targets_per_clip = frame_targets[c_i]
@@ -295,7 +308,7 @@ class Genvis(Vita):
             
             # if self.freeze_detector:
             # losses = dict()
-            
+            output_q += cls_token_query.repeat(L,1)[None]
             vita_outputs, output_q = self.vita_module(frame_queries, pre_memory, output_q)
             vita_outputs["pred_masks"] = torch.einsum("lbqc,btchw->lbqthw", vita_outputs["pred_mask_embed"], _mask_features)
             
@@ -539,6 +552,21 @@ class Genvis(Vita):
         roi_list = []
         box_list = []
         
+        texts = []
+        cls_token = []
+        # for video in batched_inputs:
+        sentence = batched_inputs["expressions"]
+        gtext = self.xdecoder.model.sem_seg_head.predictor.lang_encoder.get_text_token_embeddings([sentence], name='grounding', token=False, norm=False)
+        token_emb = gtext['token_emb']
+        tokens = gtext['tokens']
+        query_emb = token_emb[tokens['attention_mask'].bool()]
+        texts.append(query_emb)
+        cls_token.append(gtext['class_emb'])
+        
+        grounding_tokens = nn.utils.rnn.pad_sequence(texts)
+        cls_token = torch.cat(cls_token, dim=0)
+        cls_token_query = self.text_proj(cls_token)
+        
         for i in range(math.ceil(num_frames / self.len_clip_window)):
             images = batched_inputs["image"][i*self.len_clip_window : (i+1)*self.len_clip_window]
             images = [(x.to(self.device) - self.pixel_mean) / self.pixel_std for x in images]
@@ -546,19 +574,6 @@ class Genvis(Vita):
             T = images.tensor.shape[0]
             
             extra = {}
-            texts = []
-            cls_token = []
-            # for video in batched_inputs:
-            sentence = batched_inputs["expressions"]
-            gtext = self.xdecoder.model.sem_seg_head.predictor.lang_encoder.get_text_token_embeddings([sentence], name='grounding', token=False, norm=False)
-            token_emb = gtext['token_emb']
-            tokens = gtext['tokens']
-            query_emb = token_emb[tokens['attention_mask'].bool()]
-            texts.append(query_emb)
-            cls_token.append(gtext['class_emb'])
-            
-            grounding_tokens = nn.utils.rnn.pad_sequence(texts)
-            cls_token = torch.cat(cls_token, dim=0)
             extra['grounding_tokens'] = grounding_tokens.repeat_interleave(T, dim=1)
 
             with torch.no_grad():
@@ -568,6 +583,7 @@ class Genvis(Vita):
 
             L, BT, fQ, C = frame_queries.shape
             
+            output_q += cls_token_query[None]
             vita_outputs, output_q = self.vita_module(frame_queries, pre_memory, output_q)
             clip_mask_embed.append(vita_outputs["pred_mask_embed"].squeeze(1)) # squeeze batch
             clip_query_list.append(output_q)
