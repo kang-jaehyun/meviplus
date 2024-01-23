@@ -128,8 +128,6 @@ class Genvis(Vita):
         class_weight = cfg.MODEL.MASK_FORMER.CLASS_WEIGHT
         dice_weight  = cfg.MODEL.MASK_FORMER.DICE_WEIGHT
         mask_weight  = cfg.MODEL.MASK_FORMER.MASK_WEIGHT
-        fusion_mask_weight = cfg.MODEL.GENVIS.FUSION_MASK_WEIGHT
-        fusion_dice_weight = cfg.MODEL.GENVIS.FUSION_DICE_WEIGHT
         
         sim_weight   = cfg.MODEL.VITA.SIM_WEIGHT
         grounding_weight = cfg.MODEL.GENVIS.GROUNDING_WEIGHT
@@ -143,7 +141,7 @@ class Genvis(Vita):
         )
 
         genvis_weight_dict = {
-            "loss_genvis_ce": class_weight, 
+            # "loss_genvis_ce": class_weight, 
             "loss_genvis_mask": mask_weight, 
             "loss_genvis_dice": dice_weight,
 
@@ -159,7 +157,7 @@ class Genvis(Vita):
             genvis_weight_dict.update(aux_weight_dict)
         
         genvis_losses = [
-            "genvis_labels", 
+            # "genvis_labels", 
             "genvis_masks",
             # "genvis_grounding"
             # "genvis_fusion",

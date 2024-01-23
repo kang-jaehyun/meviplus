@@ -122,8 +122,9 @@ class GenVIS(VITA):
                 decoder_outputs.append(dec_out.view(L, B, self.num_queries, C))
 
         decoder_outputs = torch.stack(decoder_outputs, dim=0)   # D, L, B, cQ, C
-
-        pred_cls = self.class_embed(decoder_outputs)
+        
+        # pred_cls = self.class_embed(decoder_outputs)
+        pred_cls = torch.zeros(*decoder_outputs.shape[:4], 2).to(decoder_outputs.device)
         pred_mask_embed = self.mask_embed(decoder_outputs)
         
         if self.use_sim and self.sim_use_clip:

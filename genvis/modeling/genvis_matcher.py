@@ -95,12 +95,12 @@ class GenvisHungarianMatcher(nn.Module):
         # We flatten to compute the cost matrices in a batch
 
         # Here, "L" is the number of frame-level decoder layers.
-        out_prob = outputs["pred_logits"].softmax(-1)   # L, B, cQ, K+1
+        # out_prob = outputs["pred_logits"].softmax(-1)   # L, B, cQ, K+1
         out_mask = outputs["pred_masks"]                # L, B, cQ, T, H, W
 
         L, B, cQ, T, s_h, s_w = out_mask.shape
 
-        out_prob = out_prob.reshape(L*B, cQ, -1)
+        # out_prob = out_prob.reshape(L*B, cQ, -1)
         out_mask = out_mask.reshape(L*B, cQ, T, s_h, s_w)
 
         # If target is [vid1, vid2, vid3],
@@ -114,12 +114,12 @@ class GenvisHungarianMatcher(nn.Module):
         
         for b in range(L*B):
             new_inst = targets[b]["new_inst"]
-            b_out_prob = out_prob[b]
-            tgt_ids = targets[b]["labels"]
+            # b_out_prob = out_prob[b]
+            # tgt_ids = targets[b]["labels"]
             # Compute the classification cost. Contrary to the loss, we don't use the NLL,
             # but approximate it in 1 - proba[target class].
             # The 1 is a constant that doesn't change the matching, it can be ommitted.
-            cost_class = -b_out_prob[:, tgt_ids]
+            # cost_class = -b_out_prob[:, tgt_ids]
 
             b_out_mask = out_mask[b]  # cQ x T x H_pred x W_pred
             # gt masks are already padded when preparing target
@@ -161,7 +161,7 @@ class GenvisHungarianMatcher(nn.Module):
             # Final cost matrix
             C = (
                 self.cost_mask * cost_mask
-                + self.cost_class * cost_class
+                # + self.cost_class * cost_class
                 + self.cost_dice * cost_dice
             )
             
@@ -180,8 +180,8 @@ class GenvisHungarianMatcher(nn.Module):
             indices.append((src_i[sorted_idx], tgt_i[sorted_idx]))
 
         return [
-            (torch.as_tensor(i, dtype=torch.int64, device=out_prob.device), 
-             torch.as_tensor(j, dtype=torch.int64, device=out_prob.device))
+            (torch.as_tensor(i, dtype=torch.int64, device=out_mask.device), 
+             torch.as_tensor(j, dtype=torch.int64, device=out_mask.device))
             for i, j in indices
         ], torch.stack(ious, dim=0)
 

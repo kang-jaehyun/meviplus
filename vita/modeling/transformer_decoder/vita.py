@@ -333,7 +333,7 @@ class VITA(nn.Module):
             self.input_proj_dec = nn.Sequential()
         self.src_embed = nn.Identity()
 
-        self.class_embed = nn.Linear(hidden_dim, num_classes + 1)
+        # self.class_embed = nn.Linear(hidden_dim, num_classes + 1)
         self.mask_embed = MLP(hidden_dim, hidden_dim, mask_dim, 3)
         if self.use_sim:
             self.sim_embed_frame = nn.Linear(hidden_dim, hidden_dim)
