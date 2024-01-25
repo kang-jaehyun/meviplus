@@ -391,14 +391,17 @@ class Genvis(Vita):
         return corner_embedding
     
     def get_roi_embeds(self, outputs, multi_scale_features):
-        bmask = outputs['pred_masks'][-1] > 0
-        B, cQ, T, H, W = bmask.shape
-        bmask = bmask.permute(1,0,2,3,4).flatten(0,2) # cQ*B*T, H, W
-        bbox = torch.zeros(B*cQ*T, 4).to(bmask.device)
-        mask_sum = bmask.sum(dim=(-1,-2))
+        sig_mask = outputs['pred_masks'][-1].sigmoid()
+        objectness_logits = outputs['pred_logits'][-1].softmax(-1)[..., 0]
+        calibrated_mask = objectness_logits[..., None, None, None] * sig_mask
+        calibrated_mask = calibrated_mask > 0.25
+        B, cQ, T, H, W = calibrated_mask.shape
+        calibrated_mask = calibrated_mask.permute(1,0,2,3,4).flatten(0,2) # cQ*B*T, H, W
+        bbox = torch.zeros(B*cQ*T, 4).to(calibrated_mask.device)
+        mask_sum = calibrated_mask.sum(dim=(-1,-2))
         valid_indices = mask_sum.nonzero(as_tuple=True)
-        nonzero_bmask = bmask[valid_indices]
-        bbox[valid_indices] = torchvision.ops.masks_to_boxes(nonzero_bmask)
+        nonzero_calibrated_mask = calibrated_mask[valid_indices]
+        bbox[valid_indices] = torchvision.ops.masks_to_boxes(nonzero_calibrated_mask)
         
         objectness_embed = self.invalid_roi_emb.weight.repeat(cQ*B*T, 1)
         objectness_embed[valid_indices] = self.valid_roi_emb.weight
