@@ -122,23 +122,33 @@ class GenvisSetCriterion(nn.Module):
         L, B, cQ, _ = src_logits.shape
         src_logits = src_logits.reshape(L*B, cQ, self.num_classes+1)
 
+        # from vita
         idx = self._get_src_permutation_idx(indices)
-        target_classes_o = []
-        valid_targets = []
-        for t in (targets * L):
-            valid_targets.append(t["valid_inst"])
-            target_classes_o.append(t["labels"])
-
-        valid_targets = torch.cat(valid_targets)
-        target_classes_o = torch.cat(target_classes_o)
-        
+        target_classes_o = torch.cat([t["labels"][J] for t, (_, J) in zip(targets * L, indices)])
         target_classes = torch.full(
             src_logits.shape[:2], self.num_classes, dtype=torch.int64, device=src_logits.device
-        ) # LB, cQ
-        valid_idx = (idx[0][valid_targets], idx[1][valid_targets])
-        target_classes[valid_idx] = target_classes_o[valid_targets]
+        )
+        target_classes[idx] = target_classes_o
 
         loss_ce = F.cross_entropy(src_logits.transpose(1, 2), target_classes, self.empty_weight)
+
+        # idx = self._get_src_permutation_idx(indices)
+        # target_classes_o = []
+        # valid_targets = []
+        # for t in (targets * L):
+        #     valid_targets.append(t["valid_inst"])
+        #     target_classes_o.append(t["labels"])
+
+        # valid_targets = torch.cat(valid_targets)
+        # target_classes_o = torch.cat(target_classes_o)
+        
+        # target_classes = torch.full(
+        #     src_logits.shape[:2], self.num_classes, dtype=torch.int64, device=src_logits.device
+        # ) # LB, cQ
+        # valid_idx = (idx[0][valid_targets], idx[1][valid_targets])
+        # target_classes[valid_idx] = target_classes_o[valid_targets]
+
+        # loss_ce = F.cross_entropy(src_logits.transpose(1, 2), target_classes, self.empty_weight)
         losses = {'loss_genvis_ce': loss_ce}
 
         return losses
@@ -155,23 +165,31 @@ class GenvisSetCriterion(nn.Module):
         src_masks = src_masks.reshape(L*B, cQ, T, H, W)
 
         src_masks = src_masks[idx] # Nt x T x Hp x Wp
-        target_masks = []
-        valid_targets = []
-        for t in (targets * L):
-            valid_targets.append(t["valid_inst"])
-            target_masks.append(t["masks"])
-
-        target_masks = torch.cat(target_masks).to(src_masks)
-        valid_targets = torch.cat(valid_targets)
+        target_masks = torch.cat([t['masks'][i] for t, (_, i) in zip(targets * L, indices)]).to(src_masks)
         # Nt x T x Ht x Wt
-        
-        src_masks = src_masks[valid_targets]
-        target_masks = target_masks[valid_targets]
-
         Nt = target_masks.shape[0]
-
+        
         src_masks = src_masks.flatten(0, 1)[:, None]
         target_masks = target_masks.flatten(0, 1)[:, None]
+        
+        # src_masks = src_masks[idx] # Nt x T x Hp x Wp
+        # target_masks = []
+        # valid_targets = []
+        # for t in (targets * L):
+        #     valid_targets.append(t["valid_inst"])
+        #     target_masks.append(t["masks"])
+
+        # target_masks = torch.cat(target_masks).to(src_masks)
+        # valid_targets = torch.cat(valid_targets)
+        # # Nt x T x Ht x Wt
+        
+        # src_masks = src_masks[valid_targets]
+        # target_masks = target_masks[valid_targets]
+
+
+        # src_masks = src_masks.flatten(0, 1)[:, None]
+        # target_masks = target_masks.flatten(0, 1)[:, None]
+        
 
         with torch.no_grad():
             # sample point_coords
@@ -278,56 +296,6 @@ class GenvisSetCriterion(nn.Module):
 
         return {"loss_genvis_sim": loss_clip_sim}
     
-    def loss_fusion(self, pred_masks, video_targets, num_masks):
-        """
-
-        """
-        B,T,Hp,Wp = pred_masks.shape
-        
-        target_masks = []
-        for t in (video_targets):
-            target_masks.append(t['merged_masks'])
-        target_masks = torch.cat(target_masks) # B*cN*cT, Ht, Wt
-        BcNcT, Ht, Wt = target_masks.shape
-        
-        pred_masks = pred_masks.reshape(B*T, 1, Hp, Wp)
-        target_masks = target_masks.reshape(BcNcT, 1, Ht, Wt).to(dtype=torch.float16)
-
-        with torch.no_grad():
-            # sample point_coords
-            point_coords = get_uncertain_point_coords_with_randomness(
-                pred_masks,
-                lambda logits: calculate_uncertainty(logits),
-                self.num_points,
-                self.oversample_ratio,
-                self.importance_sample_ratio,
-            )
-            # get gt labels
-            point_labels = point_sample(
-                target_masks,
-                point_coords,
-                align_corners=False,
-            ).squeeze(1)
-
-        point_logits = point_sample(
-            pred_masks,
-            point_coords,
-            align_corners=False,
-        ).squeeze(1)
-        
-        
-        point_logits = point_logits.view(B, T * self.num_points)
-        point_labels = point_labels.view(B, T * self.num_points)
-        
-        losses = {
-            "loss_fusion_mask": sigmoid_ce_loss_jit(point_logits, point_labels, num_masks),
-            "loss_fusion_dice": dice_loss_jit(point_logits, point_labels, num_masks),
-        }
-
-        del pred_masks
-        del target_masks
-        return losses
-    
     def _get_src_permutation_idx(self, indices):
         # permute predictions following indices
         batch_idx = torch.cat([torch.full_like(src, i) for i, (src, _) in enumerate(indices)])
@@ -369,27 +337,27 @@ class GenvisSetCriterion(nn.Module):
         outputs_without_aux = {k: v for k, v in outputs.items() if k != "aux_outputs"}
 
         # Retrieve the matching between the outputs of the last layer and the targets
-        new_clip_indices, iou = self.matcher(outputs_without_aux, clip_targets, prev_clip_indices)
-        L = len(new_clip_indices)
+        clip_indices, iou = self.matcher(outputs_without_aux, clip_targets, prev_clip_indices)
+        L = len(clip_indices)
 
-        if prev_clip_indices is None: # first clip
-            clip_indices = new_clip_indices
-        else:
-            # merge indices
-            clip_indices = []
-            for t, p_i, n_i in zip(clip_targets*L, prev_clip_indices, new_clip_indices):
-                new_inst = t["new_inst"]
-                merged_src_idx = p_i[0]
-                merged_tgt_idx = p_i[1]
+        # if prev_clip_indices is None: # first clip
+        #     clip_indices = new_clip_indices
+        # else:
+        #     # merge indices
+        #     clip_indices = []
+        #     for t, p_i, n_i in zip(clip_targets*L, prev_clip_indices, new_clip_indices):
+        #         new_inst = t["new_inst"]
+        #         merged_src_idx = p_i[0]
+        #         merged_tgt_idx = p_i[1]
 
-                merged_src_idx[new_inst] = n_i[0][new_inst]
-                merged_tgt_idx[new_inst] = n_i[1][new_inst]
+        #         merged_src_idx[new_inst] = n_i[0][new_inst]
+        #         merged_tgt_idx[new_inst] = n_i[1][new_inst]
 
-                clip_indices.append((merged_src_idx, merged_tgt_idx))
+        #         clip_indices.append((merged_src_idx, merged_tgt_idx))
  
         # Compute the average number of target boxes accross all nodes, for normalization purposes
         #num_masks = sum(len(t["labels"]) for t in clip_targets) * len(outputs_without_aux["pred_masks"])
-        num_masks = sum(t["valid_inst"].sum() for t in clip_targets) * len(outputs_without_aux["pred_masks"])
+        num_masks = sum(len(t["labels"]) for t in clip_targets) * len(outputs_without_aux["pred_masks"])
         num_masks = torch.as_tensor(
             [num_masks], dtype=torch.float, device=next(iter(outputs.values())).device
         )
@@ -410,24 +378,7 @@ class GenvisSetCriterion(nn.Module):
         if "aux_outputs" in outputs:
             aux_clip_indices_list = []
             for i, aux_outputs in enumerate(outputs["aux_outputs"]):
-                if prev_aux_clip_indices is None:
-                    new_aux_clip_indices, _ = self.matcher(aux_outputs, clip_targets)
-                else:
-                    new_aux_clip_indices, _ = self.matcher(aux_outputs, clip_targets, prev_aux_clip_indices[i])
-                if prev_aux_clip_indices is None:
-                    aux_clip_indices = new_aux_clip_indices
-                else:
-                    # merge indices
-                    aux_clip_indices = []
-                    for t, p_i, n_i in zip(clip_targets*L, prev_aux_clip_indices[i], new_aux_clip_indices):
-                        new_inst = t["new_inst"]
-                        merged_src_idx = p_i[0]
-                        merged_tgt_idx = p_i[1]
-
-                        merged_src_idx[new_inst] = n_i[0][new_inst]
-                        merged_tgt_idx[new_inst] = n_i[1][new_inst]
-
-                        aux_clip_indices.append((merged_src_idx, merged_tgt_idx))
+                aux_clip_indices, _ = self.matcher(aux_outputs, clip_targets)
 
                 for loss in self.losses:
                     l_dict = self.get_loss(

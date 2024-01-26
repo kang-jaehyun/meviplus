@@ -113,7 +113,7 @@ class GenvisHungarianMatcher(nn.Module):
         eps = 1e-6
         
         for b in range(L*B):
-            new_inst = targets[b]["new_inst"]
+            # new_inst = targets[b]["new_inst"]
             b_out_prob = out_prob[b]
             tgt_ids = targets[b]["labels"]
             # Compute the classification cost. Contrary to the loss, we don't use the NLL,
@@ -142,13 +142,13 @@ class GenvisHungarianMatcher(nn.Module):
                 align_corners=False,
             ).flatten(1)
             
-            if b in range(L*B - B, L*B):
-                if tgt_mask.size(0) == 0:
-                    iou = torch.zeros(cQ, device=b_out_mask.device)
-                    ious.append(iou)
-                else:
-                    iou = torch.logical_and(b_out_mask.unsqueeze(0) > 0, tgt_mask.unsqueeze(1)).sum(dim=2) / (torch.logical_or(b_out_mask.unsqueeze(0) > 0, tgt_mask.unsqueeze(1)).sum(dim=2) + eps) # target_num, cQ
-                    ious.append(iou.max(dim=0)[0]) # cQ
+            
+            if tgt_mask.size(0) == 0:
+                iou = torch.zeros(cQ, device=b_out_mask.device)
+                ious.append(iou)
+            else:
+                iou = torch.logical_and(b_out_mask.unsqueeze(0) > 0, tgt_mask.unsqueeze(1)).sum(dim=2) / (torch.logical_or(b_out_mask.unsqueeze(0) > 0, tgt_mask.unsqueeze(1)).sum(dim=2) + eps) # target_num, cQ
+                ious.append(iou.max(dim=0)[0]) # cQ
             
             with autocast(enabled=False):
                 b_out_mask = b_out_mask.float()
@@ -165,13 +165,13 @@ class GenvisHungarianMatcher(nn.Module):
                 + self.cost_dice * cost_dice
             )
             
-            C[:, ~new_inst] = 1e+6 # consider newly appeared instances only
+            # C[:, ~new_inst] = 1e+6 # consider newly appeared instances only
 
-            if prev_clip_indices: # exclude previously matched src query indices
-                valid_inst = targets[b]["valid_inst"]
-                old_inst = valid_inst & (~new_inst)
-                prev_src_idx = prev_clip_indices[b][0][old_inst]
-                C[prev_src_idx, :] = 1e+6
+            # if prev_clip_indices: # exclude previously matched src query indices
+            #     valid_inst = targets[b]["valid_inst"]
+            #     old_inst = valid_inst & (~new_inst)
+            #     prev_src_idx = prev_clip_indices[b][0][old_inst]
+            #     C[prev_src_idx, :] = 1e+6
 
             # sort tgt indices in ascending order
             src_i, tgt_i = linear_sum_assignment(C.cpu())

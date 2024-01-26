@@ -16,7 +16,7 @@ class GenVIS(VITA):
 
         self.num_frames = cfg.MODEL.GENVIS.LEN_CLIP_WINDOW
         hidden_dim = cfg.MODEL.VITA.HIDDEN_DIM
-        motion_dim = cfg.XDECODER.MODEL.ENCODER.MASK_DIM
+        # motion_dim = cfg.XDECODER.MODEL.ENCODER.MASK_DIM
 
         self.pre_memory_embed_k = nn.Linear(hidden_dim, hidden_dim)
         self.pre_memory_embed_v = nn.Linear(hidden_dim, hidden_dim)
@@ -24,9 +24,11 @@ class GenVIS(VITA):
         self.pre_query_embed_k = nn.Linear(hidden_dim, hidden_dim)
         self.pre_query_embed_v = nn.Linear(hidden_dim, hidden_dim)
 
+        # override
+        self.class_embed = nn.Linear(hidden_dim + cfg.XDECODER.MODEL.ENCODER.MASK_DIM, cfg.MODEL.SEM_SEG_HEAD.NUM_CLASSES + 1)
         # self.motion_embed = nn.Linear(hidden_dim, motion_dim)
         
-    def forward(self, frame_query, pre_memory, output):
+    def forward(self, frame_query, pre_memory, output, cls_token):
         """
         L: Number of Layers.
         B: Batch size.
@@ -122,8 +124,9 @@ class GenVIS(VITA):
                 decoder_outputs.append(dec_out.view(L, B, self.num_queries, C))
 
         decoder_outputs = torch.stack(decoder_outputs, dim=0)   # D, L, B, cQ, C
-
-        pred_cls = self.class_embed(decoder_outputs)
+        D, L, B, cQ, C = decoder_outputs.shape
+        cls_token = cls_token[None, None, :, None, :].repeat(D, L, 1, cQ, 1)
+        pred_cls = self.class_embed(torch.cat([decoder_outputs, cls_token], dim=-1)) # D, L, B, cQ, K+1
         pred_mask_embed = self.mask_embed(decoder_outputs)
         
         if self.use_sim and self.sim_use_clip:
