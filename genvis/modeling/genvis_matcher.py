@@ -73,7 +73,7 @@ class GenvisHungarianMatcher(nn.Module):
     while the others are un-matched (and thus treated as non-objects).
     """
 
-    def __init__(self, cost_class: float = 1, cost_mask: float = 1, cost_dice: float = 1, num_points: int = 0):
+    def __init__(self, cost_class: float = 1, cost_mask: float = 1, cost_dice: float = 1, cost_score: float = 1, num_points: int = 0):
         """Creates the matcher
 
         Params:
@@ -85,8 +85,9 @@ class GenvisHungarianMatcher(nn.Module):
         self.cost_class = cost_class
         self.cost_mask = cost_mask
         self.cost_dice = cost_dice
+        self.cost_score = cost_score
 
-        assert cost_class != 0 or cost_mask != 0 or cost_dice != 0, "all costs cant be 0"
+        assert cost_class != 0 or cost_mask != 0 or cost_dice != 0 or cost_score != 0, "all costs cant be 0"
 
         self.num_points = num_points
 
@@ -97,11 +98,16 @@ class GenvisHungarianMatcher(nn.Module):
         # Here, "L" is the number of frame-level decoder layers.
         out_prob = outputs["pred_logits"].softmax(-1)   # L, B, cQ, K+1
         out_mask = outputs["pred_masks"]                # L, B, cQ, T, H, W
-
+        
         L, B, cQ, T, s_h, s_w = out_mask.shape
-
+        
         out_prob = out_prob.reshape(L*B, cQ, -1)
         out_mask = out_mask.reshape(L*B, cQ, T, s_h, s_w)
+        
+        if 'scores' in outputs:
+            out_scores = outputs['scores']
+        else: # aux
+            out_scores = torch.zeros(L*B, cQ, device=out_prob.device)
 
         # If target is [vid1, vid2, vid3],
         # it now becomes [vid1, vid2, vid3, vid1, vid2, vid3, ...].
@@ -120,7 +126,8 @@ class GenvisHungarianMatcher(nn.Module):
             # but approximate it in 1 - proba[target class].
             # The 1 is a constant that doesn't change the matching, it can be ommitted.
             cost_class = -b_out_prob[:, tgt_ids]
-
+            cost_score = -out_scores[b][tgt_ids]
+            
             b_out_mask = out_mask[b]  # cQ x T x H_pred x W_pred
             # gt masks are already padded when preparing target
             tgt_mask = targets[b]["masks"].to(b_out_mask) # Nins x T x H_tgt x W_tgt
@@ -163,6 +170,7 @@ class GenvisHungarianMatcher(nn.Module):
                 self.cost_mask * cost_mask
                 + self.cost_class * cost_class
                 + self.cost_dice * cost_dice
+                + self.cost_score * cost_score
             )
             
             # C[:, ~new_inst] = 1e+6 # consider newly appeared instances only
