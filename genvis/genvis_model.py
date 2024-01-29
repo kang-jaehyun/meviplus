@@ -49,6 +49,7 @@ class Genvis(Vita):
     ):
         super().__init__(**kwargs)
 
+        self.eps = 1e-6
         self.len_clip_window = len_clip_window
         self.genvis_criterion = genvis_criterion
         self.freeze_detector = kwargs["freeze_detector"]
@@ -57,22 +58,25 @@ class Genvis(Vita):
         self.mask2former_hidden_dim = mask2former_hidden_dim
         self.xdecoder_hidden_dim = xdecoder_hidden_dim
 
-        self.query_proj = nn.Sequential(
-                                        MLP(
-                                            input_dim=xdecoder_hidden_dim, 
-                                            hidden_dim=xdecoder_hidden_dim, 
-                                            output_dim=mask2former_hidden_dim,
-                                            num_layers=3
-                                            ),
-                                        nn.LayerNorm(mask2former_hidden_dim)
-                                        )
+        self.query_proj = MLP(
+                            input_dim=xdecoder_hidden_dim, 
+                            hidden_dim=xdecoder_hidden_dim, 
+                            output_dim=mask2former_hidden_dim,
+                            num_layers=1
+                            )
+        self.cls_proj = MLP(
+                            input_dim=xdecoder_hidden_dim, 
+                            hidden_dim=xdecoder_hidden_dim, 
+                            output_dim=mask2former_hidden_dim,
+                            num_layers=1
+                            )
+                                        
         self.iou_predictor_head = MLP(
                                     input_dim=mask2former_hidden_dim,
                                     hidden_dim=mask2former_hidden_dim,
                                     output_dim=20, # TODO
                                     num_layers=3
                                     )
-
 
         # LSTM
         lstm_hidden_dim = mask2former_hidden_dim // 2
@@ -616,9 +620,10 @@ class Genvis(Vita):
         lstm_output, (hn, cn) = self.lstm(object_feature, (self.initial_hidden.weight.unsqueeze(1).repeat_interleave(LB*cQ, dim=1), self.initial_cell.weight.unsqueeze(1).repeat_interleave(LB*cQ, dim=1)))
         
         output = self.score_decoder(lstm_output.reshape(num_frames, cQ, LB, C), cls_token)
-        iou_pred = self.iou_predictor_head(output[-1])
+        iou_pred = self.iou_predictor_head(output[-1]).clamp(min=self.eps)
         query_logit = global_outputs['pred_logits'].softmax(-1)[..., 0][0]
-        final_score = iou_pred + query_logit
+        
+        final_score = gmean(torch.cat([iou_pred, query_logit], dim=0), dim=0)
         # where = sim > 0.5
         # indices = where.nonzero(as_tuple=False)[:,1]
     
@@ -863,3 +868,7 @@ class PositionEmbeddingRandom(nn.Module):
         coords[:, :, 0] = coords[:, :, 0] / image_size[1]
         coords[:, :, 1] = coords[:, :, 1] / image_size[0]
         return self._pe_encoding(coords.to(torch.float))  # B x N x C
+    
+def gmean(input_x, dim):
+    log_x = torch.log(input_x)
+    return torch.exp(torch.mean(log_x, dim=dim))
