@@ -331,6 +331,7 @@ class Genvis(Vita):
         lstm_output, (hn, cn) = self.lstm(object_feature, (self.initial_hidden.weight.unsqueeze(1).repeat_interleave(LB*cQ, dim=1), self.initial_cell.weight.unsqueeze(1).repeat_interleave(LB*cQ, dim=1)))
         # video_iou = torch.stack(ious_list, dim=0).mean(dim=0)
 
+        output_q = output_q + self.cls_proj(cls_token)[None].repeat(cQ, L, 1)
         output = self.score_decoder(lstm_output.reshape(cN*cT, cQ, LB, C), cls_token)
         scores = self.iou_predictor_head(output[-1])
         global_outputs['scores'] = scores
@@ -571,6 +572,7 @@ class Genvis(Vita):
 
             L, BT, fQ, C = frame_queries.shape
             
+            output_q = output_q + self.cls_proj(cls_token)[None].repeat(cQ, 1, 1)
             vita_outputs, output_q = self.vita_module(frame_queries, pre_memory, output_q, cls_token)
             clip_mask_embed.append(vita_outputs["pred_mask_embed"].squeeze(1)) # squeeze batch
             clip_queries_list.append(output_q)
