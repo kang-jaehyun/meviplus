@@ -19,6 +19,7 @@ from transformers import BertModel, RobertaModel
 # import clip
 
 from vita.modeling.transformer_decoder.vita import FFNLayer, CrossAttentionLayer, SelfAttentionLayer, MLP, _get_activation_fn
+import gc
 
 from detectron2.projects.point_rend.point_features import (
     get_uncertain_point_coords_with_randomness,
@@ -287,6 +288,7 @@ class Genvis(Vita):
             
             # if self.freeze_detector:
             # losses = dict()
+            
             output_q = output_q + query_cond
             vita_outputs, output_q = self.vita_module(frame_queries, pre_memory, output_q, cls_token)
             vita_outputs["pred_masks"] = torch.einsum("lbqc,btchw->lbqthw", vita_outputs["pred_mask_embed"], _mask_features)
@@ -395,11 +397,17 @@ class Genvis(Vita):
         calibrated_mask = calibrated_mask > 0.5
         LB, cQ, T, H, W = calibrated_mask.shape
         calibrated_mask = calibrated_mask.permute(1,0,2,3,4).flatten(0,2) # cQ*LB*T, H, W
+        
         bbox = torch.zeros(LB*cQ*T, 4).to(calibrated_mask.device)
         mask_sum = calibrated_mask.sum(dim=(-1,-2))
         valid_indices = mask_sum.nonzero(as_tuple=True)
-        nonzero_calibrated_mask = calibrated_mask[valid_indices]
-        bbox[valid_indices] = torchvision.ops.masks_to_boxes(nonzero_calibrated_mask)
+        calibrated_mask = calibrated_mask[valid_indices]
+        bbox[valid_indices] = torchvision.ops.masks_to_boxes(calibrated_mask)
+        
+        del calibrated_mask
+        # del nonzero_calibrated_mask, calibrated_mask
+        # gc.collect()
+        # torch.cuda.empty_cache()
         
         objectness_embed = self.invalid_roi_emb.weight.repeat(cQ*LB*T, 1)
         objectness_embed[valid_indices] = self.valid_roi_emb.weight
