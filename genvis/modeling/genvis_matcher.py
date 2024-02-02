@@ -168,9 +168,9 @@ class GenvisHungarianMatcher(nn.Module):
             # Final cost matrix
             C = (
                 self.cost_mask * cost_mask
-                + self.cost_class * cost_class
+                # + self.cost_class * cost_class
                 + self.cost_dice * cost_dice
-                + self.cost_score * cost_score
+                # + self.cost_score * cost_score
             )
             
             # C[:, ~new_inst] = 1e+6 # consider newly appeared instances only
