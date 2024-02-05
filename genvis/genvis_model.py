@@ -46,6 +46,7 @@ class Genvis(Vita):
         score_decoder: nn.Module,
         mask2former_hidden_dim: int,
         xdecoder_hidden_dim: int,
+        threshold: float, 
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -54,7 +55,7 @@ class Genvis(Vita):
         self.len_clip_window = len_clip_window
         self.genvis_criterion = genvis_criterion
         self.freeze_detector = kwargs["freeze_detector"]
-        # self.motion2text = motion2text
+        self.score_threshold = threshold
         
         self.mask2former_hidden_dim = mask2former_hidden_dim
         self.xdecoder_hidden_dim = xdecoder_hidden_dim
@@ -209,6 +210,7 @@ class Genvis(Vita):
             "mask2former_hidden_dim": cfg.MODEL.VITA.HIDDEN_DIM,
             "xdecoder_hidden_dim": cfg.XDECODER.MODEL.ENCODER.MASK_DIM,
             "score_decoder": score_decoder,
+            "threshold": cfg.MODEL.GENVIS.THRESHOLD
         })
 
         return rets
@@ -623,10 +625,11 @@ class Genvis(Vita):
         query_logit = global_outputs['pred_logits'].softmax(-1)[..., 0][0]
         
         final_score = gmean(torch.cat([iou_pred, query_logit], dim=0), dim=0)
-        # where = sim > 0.5
-        # indices = where.nonzero(as_tuple=False)[:,1]
+        where = final_score > self.score_threshold
+        indices = where.nonzero(as_tuple=False).flatten()
     
-        indices = final_score.topk(1)[1].flatten()
+        # top1
+        # indices = final_score.topk(1)[1].flatten()
         # indices = sim.argmax()
         
         stacked_mask_embed = torch.stack(clip_mask_embed).permute(2,0,1,3) # nC, B(1), cQ, C -> cQ, nC, B(1), C
@@ -644,24 +647,29 @@ class Genvis(Vita):
         all_mask_pred = mask_pred[:,:, :H_small, :W_small] > 0.
         mask_pred = mask_pred[indices]
         
-        mask_pred = retry_if_cuda_oom(F.interpolate)(
-            mask_pred,
-            size=interim_size,
-            mode="bilinear",
-            align_corners=False,
-        ) # Q, T, H, W
-                
         del clip_mask_embed, mask_features
         
-        mask_pred = mask_pred[:, :, : image_size[0], : image_size[1]]
-        
-        
-        mask_pred = retry_if_cuda_oom(F.interpolate)(
-            mask_pred, size=(out_height, out_width), mode="bilinear", 
-            align_corners=False
-        ) > 0.
+        masks_per_clip = []
+        for i in range(math.ceil(num_frames/self.len_clip_window)):
+            mask_pred_clip = retry_if_cuda_oom(F.interpolate)(
+                mask_pred[:, i*self.len_clip_window : (i+1)*self.len_clip_window],
+                size=interim_size,
+                mode="bilinear",
+                align_corners=False,
+            ) # Q, T, H, W
+                    
+            mask_pred_clip = mask_pred_clip[:, :, : image_size[0], : image_size[1]]
+            
+            mask_pred_clip = retry_if_cuda_oom(F.interpolate)(
+                mask_pred_clip, size=(out_height, out_width), mode="bilinear", 
+                align_corners=False
+            ) > 0.
 
-        mask_pred = retry_if_cuda_oom(torch.sum)(mask_pred, dim=0).clamp(max=1)[None]
+            mask_pred_clip = retry_if_cuda_oom(torch.sum)(mask_pred_clip, dim=0).clamp(max=1)[None]
+            
+            masks_per_clip.append(mask_pred_clip)
+        
+        mask_pred = torch.cat(masks_per_clip, dim=1)
     
 
         processed_results = {
