@@ -625,11 +625,14 @@ class Genvis(Vita):
         query_logit = global_outputs['pred_logits'].softmax(-1)[..., 0][0]
         
         final_score = gmean(torch.cat([iou_pred, query_logit], dim=0), dim=0)
+        # final_score = query_logit
+        
+        # for multi-object inference
         where = final_score > self.score_threshold
         indices = where.nonzero(as_tuple=False).flatten()
     
         # top1
-        # indices = final_score.topk(1)[1].flatten()
+        indices = final_score.topk(1)[1].flatten()
         # indices = sim.argmax()
         
         stacked_mask_embed = torch.stack(clip_mask_embed).permute(2,0,1,3) # nC, B(1), cQ, C -> cQ, nC, B(1), C

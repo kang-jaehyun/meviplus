@@ -74,14 +74,14 @@ INPUT:
   # MIN_SIZE_TRAIN_SAMPLING : ["range", "choice", "range_by_clip", "choice_by_clip"]
   MIN_SIZE_TRAIN_SAMPLING: "choice_by_clip"
   # RANDOM_FLIP : ["none", "horizontal", "flip_by_clip"]. "horizontal" is set by default.
-  RANDOM_FLIP: "flip_by_clip"
+  RANDOM_FLIP: "none"
   AUGMENTATIONS: []
   MIN_SIZE_TRAIN: (288, 320, 352, 384, 416, 448, 480, 512)
   MAX_SIZE_TRAIN: 768
   MIN_SIZE_TEST: 360
   FORMAT: "RGB"
   CROP:
-    ENABLED: True
+    ENABLED: False
     TYPE: "absolute_range"
     SIZE: (384, 600)
   # For pseudo videos
@@ -90,7 +90,7 @@ INPUT:
     MIN_SIZE_TRAIN: (288, 320, 352, 384, 416, 448, 480, 512)
     MAX_SIZE_TRAIN: 768
     CROP:
-      ENABLED: True
+      ENABLED: False
       TYPE: "absolute_range"
       SIZE: (384, 600)
   LSJ_AUG:
